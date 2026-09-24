@@ -13,7 +13,7 @@ Global state, env.state():
     [agent_xy * N, block_xy, block_angle, agent_vxvy * N]    (N=1: the original 7-d layout)
 
 Egocentric rendering: shape = entity type, color = role relative to the viewer.
-    self            circle, blue (+ dark ring if self_marker='ring')
+    self            circle, blue
     other agents    circle, orange (others='distinct'); same orange for every other agent,
                     so it means "another agent", not a fixed identity
     T-block / goal  gray / green, as in the original
@@ -41,8 +41,7 @@ from stable_worldmodel.envs.utils import DrawOptions
 
 # identity colors for the audit view: none of them is blue / orange (self / other) or gray / green (T / goal)
 AUDIT_COLORS = ['MediumOrchid', 'Crimson', 'Gold', 'DeepPink', 'Sienna', 'DarkCyan']
-OTHER_COLOR = 'DarkOrange'   # others='distinct'
-RING_COLOR = 'MidnightBlue'  # self_marker='ring'
+OTHER_COLOR = 'DarkOrange'  # others='distinct'
 OTHERS_MODES = ('visible', 'distinct', 'hidden')
 
 
@@ -61,20 +60,17 @@ class PushTN(PushT):
         self,
         n_agents=2,
         others='distinct',
-        self_marker='ring',
         agent_collisions=True,
         agent_mass=1000.0,
-        success='block',
+        success='pusht',
         audit_resolution=512,
         **kwargs,
     ):
         assert others in OTHERS_MODES, f'others must be one of {OTHERS_MODES}'
-        assert self_marker in ('ring', 'none')
         assert success in ('block', 'pusht')
         super().__init__(**kwargs)
         self.n_agents = n_agents
         self.others = others
-        self.self_marker = self_marker
         self.agent_collisions = agent_collisions
         self.agent_mass = agent_mass
         self.success = success
@@ -198,8 +194,18 @@ class PushTN(PushT):
         pos, vel = s[2 * i : 2 * i + 2], s[2 * N + 3 + 2 * i : 2 * N + 5 + 2 * i]
         return np.concatenate([pos, vel]), np.concatenate([pos, s[2 * N : 2 * N + 3], vel])
 
+    def errors(self, goal_state, cur_state):
+        """T position error, T angle error, and each agent's distance to its goal position."""
+        N = self.n_agents
+        block = np.linalg.norm(goal_state[2 * N : 2 * N + 2] - cur_state[2 * N : 2 * N + 2])
+        angle = np.abs(goal_state[2 * N + 2] - cur_state[2 * N + 2])
+        angle = np.minimum(angle, 2 * np.pi - angle)
+        agents = np.linalg.norm((goal_state[: 2 * N] - cur_state[: 2 * N]).reshape(N, 2), axis=1)
+        return float(block), float(angle), agents
+
     def eval_state(self, goal_state, cur_state):
-        """success: block pose within the PushT tolerance ('pusht': also agent 0, as the original)."""
+        """Original PushT test ('pusht'): |[agent 0 xy, T xy] - goal| < 20 px and T angle < 20 deg,
+        i.e. the T *and* agent 0 at their goal. 'block': T pose only (ends before the agent arrives)."""
         N = self.n_agents
         b = slice(2 * N, 2 * N + 2)
         pos_diff = goal_state[b] - cur_state[b]
@@ -266,9 +272,8 @@ class PushTN(PushT):
     # rendering #
     #############
 
-    def _draw(self, agent_colors, size, ring=None):
-        """Same drawing as PushT._render_frame, with one color (RGB or RGBA) per agent,
-        and optionally a ring around agent `ring`."""
+    def _draw(self, agent_colors, size):
+        """Same drawing as PushT._render_frame, with one color (RGB or RGBA) per agent."""
         canvas = pygame.Surface((self.window_size, self.window_size))
         canvas.fill(self.variation_space['background']['color'].value)
         draw_options = _DrawOptions(canvas)
@@ -288,17 +293,13 @@ class PushTN(PushT):
             self._set_body_color(body, color)
         self._set_body_color(self.block, self.variation_space['block']['color'].value.tolist())
         self.space.debug_draw(draw_options)
-        if ring is not None:
-            body = self.agents[ring]
-            radius = max(s.radius for s in body.shapes)
-            pygame.draw.circle(canvas, pygame.Color(RING_COLOR), pymunk.pygame_util.to_pygame(body.position, canvas), round(radius) + 3, 5)
 
         img = np.transpose(np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2))
         return cv2.resize(img, (size, size)) if size != self.window_size else img
 
     def render_view(self, i, others=None):
-        """Agent i's egocentric pixels (224 px). With others='hidden' and self_marker='none'
-        this is exactly the single-agent PushT frame."""
+        """Agent i's egocentric pixels (224 px). With others='hidden' this is exactly the
+        single-agent PushT frame."""
         own = self.variation_space['agent']['color'].value.tolist()
         other = {
             'visible': own,
@@ -306,7 +307,7 @@ class PushTN(PushT):
             'hidden': [*own, 0],
         }[others or self.others]
         colors = [own if j == i else other for j in range(self.n_agents)]
-        return self._draw(colors, self.render_size, ring=i if self.self_marker == 'ring' else None)
+        return self._draw(colors, self.render_size)
 
     def render_audit(self, text=None):
         """Full-resolution view with a distinct color and index per agent, for auditing."""

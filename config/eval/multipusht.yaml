@@ -6,9 +6,8 @@ defaults:
 env:
   n_agents: 2
   others: distinct       # other agents in an agent's view: distinct (orange) | visible (blue, like self) | hidden
-  self_marker: ring      # ring around self in its own view | none (original look)
   agent_collisions: true # agents collide with each other (and walls); false = original kinematic agents
-  success: block         # block: T pose only | pusht: original criterion (block + agent 0 position)
+  success: pusht         # pusht: original test, T pose + agent 0 at its goal spot | block: T pose only (ends early)
 
 policy: lewm/pusht       # used for every agent (independent instances); ckpt relative to $STABLEWM_HOME/checkpoints, or random
 policies: null           # optional per-agent list, e.g. [lewm/pusht, random]
@@ -39,4 +38,4 @@ eval:
   video: true
 
 output:
-  dir: multipusht/${env.n_agents}a_${env.others}_${env.self_marker} # relative to $STABLEWM_HOME
+  dir: multipusht/${env.n_agents}a_${env.others} # relative to $STABLEWM_HOME

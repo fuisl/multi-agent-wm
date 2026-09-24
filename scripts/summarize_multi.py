@@ -42,8 +42,7 @@ def main():
         trivial = np.array([e.get("solved_at_start", False) for e in r["episodes"]])
         nontrivial = f"{100 * success[~trivial].mean():.0f}% ({int((~trivial).sum())})" if "solved_at_start" in r["episodes"][0] else "-"
         contact = " / ".join(f"{c:.2f}" for c in s["block_contact_frac"])
-        view = f"{cfg['env']['others']}, {cfg['env'].get('self_marker', 'none')}"
-        print(f"| {name} | {', '.join(policies)} ({view}) | {s['success_rate']:.0f}% | {nontrivial} | {steps} | "
+        print(f"| {name} | {', '.join(policies)} ({cfg['env']['others']}) | {s['success_rate']:.0f}% | {nontrivial} | {steps} | "
               f"{contact} | {s['co_contact_frac']:.2f} | {s['agent_contact_frac']:.2f} | {helped} | {hurt} |")
 
 

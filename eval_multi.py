@@ -157,6 +157,7 @@ def run(cfg: DictConfig):
     for e, env in enumerate(envs):
         if cfg.eval.swm_reset:  # swm.World order: random reset, then set state / goal (1 agent only)
             assert n_agents == 1, "eval.swm_reset only reproduces the single-agent protocol"
+            assert cfg.eval.goal == "dataset", "eval.swm_reset sets the goal after reset, so goal renders would be stale"
             env.reset()
             env.core._set_state(init["state"][e])
             env.core._set_goal_state(goal["goal_state"][e])
@@ -186,6 +187,14 @@ def run(cfg: DictConfig):
     block_contact = np.zeros((n, cfg.eval.eval_budget, n_agents), dtype=bool)
     agent_contact = np.zeros((n, cfg.eval.eval_budget, n_agents), dtype=bool)
     steps = np.zeros(n, dtype=int)
+    trace = [[] for _ in range(n)]  # per step: T pos err, T angle err, each agent's distance to its goal
+
+    def log(e):
+        block, angle, agents = envs[e].core.errors(envs[e].core.goal_state, envs[e].state())
+        trace[e].append([round(block, 2), round(angle, 3), *np.round(agents, 2).tolist()])
+
+    for e in range(n):
+        log(e)
     frames = [[panel(env, obs[e], agent_goals[0]["goal"][e], "t=0")] for e, env in enumerate(envs)] if cfg.eval.video else None
 
     start_time = time.time()
@@ -207,6 +216,7 @@ def run(cfg: DictConfig):
                 continue
             obs[e], _, term, _, info = env.step({ag: actions[i][e] for i, ag in enumerate(env.possible_agents)})
             steps[e] = t + 1
+            log(e)
             for i, ag in enumerate(env.possible_agents):
                 block_contact[e, t, i] = info[ag]["block_contact"]
                 agent_contact[e, t, i] = info[ag]["agent_contact"]
@@ -239,6 +249,7 @@ def run(cfg: DictConfig):
             "block_contact_frac": bc.mean(0).tolist(),            # per agent
             "co_contact_frac": float((bc.sum(1) >= 2).mean()),    # >= 2 agents touching the block
             "agent_contact_frac": float(agent_contact[e, : steps[e]].any(1).mean()),
+            "trace": trace[e],
         })
         if frames is not None:
             tag = "success" if done[e] else "fail"

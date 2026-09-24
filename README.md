@@ -82,7 +82,7 @@ Results and per-episode videos are written to `$STABLEWM_HOME/<policy dir>/` (e.
 ```python
 from world import MultiPushT
 
-env = MultiPushT(n_agents=3)              # egocentric views: self blue + ring, others orange
+env = MultiPushT(n_agents=3)              # egocentric views: self blue, others orange
 obs, infos = env.reset(seed=0)            # obs["agent_0"] = {"pixels", "proprio", "state"}, infos[...]["goal"]
 obs, rew, term, trunc, infos = env.step({a: env.action_space(a).sample() for a in env.agents})
 frame = env.render()                      # audit frame: global view, identity color + index per agent
@@ -92,68 +92,84 @@ frame = env.render()                      # audit frame: global view, identity c
 
 | entity | shape | appearance in agent *i*'s view |
 |---|---|---|
-| self (agent *i*) | circle | blue, plus a dark ring (`self_marker=ring`, default; `none` = original look) |
+| self (agent *i*) | circle | blue, as in the original |
 | any other agent | circle | orange (`others=distinct`, default). The same orange for every other agent, so it means "another agent", not an identity. `visible` draws them blue, `hidden` leaves them out |
 | T-block / goal | T | gray / green, as in the original |
 
 An agent's goal image shows the T at its goal pose and the agent itself at its goal position (other agents are left out). Agent 0's goal position is the dataset's; agents 1..N-1 keep their start position. The audit view uses identity colors that are none of blue, orange, gray or green.
 
-**Physics.** `agent_collisions=true` (default): the original agent is a kinematic body, and pymunk never collides two kinematic bodies. So agents become heavy dynamic bodies driven by the same PD controller and kept inside the walls. The T's motion differs from the original by under 0.01 px. `success=block` (default) requires only the T pose; `pusht` is the original criterion, which also requires agent 0 at its goal position.
+**Physics.** `agent_collisions=true` (default): the original agent is a kinematic body, and pymunk never collides two kinematic bodies. So agents become heavy dynamic bodies driven by the same PD controller and kept inside the walls. The T's motion differs from the original by under 0.01 px.
 
-Checks: with `n_agents=1`, kinematic agents and `self_marker=none`, the env is bit-identical to swm PushT (pixels and 200-step trajectories). `pettingzoo.test.parallel_api_test` passes.
+**Success** (`env.success`), checked after every step; an episode ends at the first success:
+
+| criterion | test | notes |
+|---|---|---|
+| `pusht` (default) | ‖[agent 0 xy, T xy] − goal‖ < 20 px **and** T angle error < 20° | The original `PushT.eval_state`: the T *and* agent 0 must be at the goal configuration shown in the goal image |
+| `block` | ‖T xy − goal‖ < 20 px and T angle error < 20° | T only. Ends before the agent reaches its goal spot, and 14 of the 50 official episodes already pass at t=0 |
+
+Checks: with `n_agents=1`, kinematic agents and `others=hidden`, the env is bit-identical to swm PushT (pixels and 200-step trajectories). `pettingzoo.test.parallel_api_test` passes.
 
 ### Independent LeWM planners
 
 `eval_multi.py` gives every agent its own LeWM instance and its own CEM solver (seed + i), planning on its own view toward its own goal image. It follows the `eval.py` protocol: the same 50 dataset episodes and start states, with a budget of 50 steps. Agent 0 and the T start from the dataset state. Other agents spawn at seeded random positions away from the T, so every run sees the same episodes and placements.
 
 ```bash
-python eval_multi.py env.n_agents=3                    # defaults: egocentric views + ring, per-agent goal renders
-python eval_multi.py env.n_agents=3 env.self_marker=none
+python eval_multi.py env.n_agents=3                    # defaults: orange others, per-agent goal renders, original success test
 python eval_multi.py 'policies=[lewm/pusht,random]'    # control: LeWM + random agent
-python scripts/summarize_multi.py --root data/multipusht/egocentric --ref 1a_plain
+python scripts/summarize_multi.py --root data/multipusht/egocentric --ref 1a
 ```
 
-Each run writes `results.json` and one audit video per episode (audit | each agent's view | goal) to `$STABLEWM_HOME/multipusht/<run>/`.
+Each run writes `results.json` to `$STABLEWM_HOME/multipusht/<run>/`, with per-episode metrics and a per-step `trace` of [T position error, T angle error, each agent's distance to its goal spot], plus one audit video per episode (audit | each agent's view | goal).
 
-**Harness check.** The following reproduces `eval.py` exactly: 98%, with the same failed episode (14) and the same per-step trajectories.
+### Single-agent audit against the official eval
+
+The following reproduces `eval.py` exactly: 98%, with the same failed episode (14) and the same per-step trajectories.
 
 ```bash
-python eval_multi.py env.n_agents=1 env.agent_collisions=false env.success=pusht env.self_marker=none \
+python eval_multi.py env.n_agents=1 env.agent_collisions=false env.others=hidden \
     eval.goal=dataset eval.dataset_first_frame=true eval.swm_reset=true
 ```
 
-When comparing videos, note that swm records frames only after each step, while `eval_multi.py` also stores t=0. With `success=block`, an episode ends as soon as the T is in place, so the agent does not travel on to its goal position as it does in the official videos.
+When comparing videos, note that swm records frames only after each step, while `eval_multi.py` also stores t=0.
 
-**Pre-solved episodes.** In 14 of the 50 official episodes the T is already within tolerance at t=0 (the goal is only 25 steps ahead). Under `success=block` these count as successes, so the tables also report success on the 36 non-trivial episodes.
+With the T-only test, single-agent episodes ended long before the agent reached its goal spot. Over the 49 official successes, the T-only test would fire a median of 12 steps earlier (up to 47), when the agent is still a median 52 px from its spot. For example, in episode 03 the T is placed at step 3 but the agent arrives at step 24; in episode 08 the T starts on target, but the agent needs 22 steps to cover 191 px. The official videos stop moving exactly at those steps. The original test is therefore the default.
 
-### Results (50 paired episodes, seed 42, `success=block`)
+Our default single-agent setup scores 90% rather than 98% under the same test. Changing one factor at a time from the exact official setup:
 
-Egocentric views (orange others), with and without the self ring. *helped* / *hurt* count episodes won or lost relative to one agent with the same look:
+| change from the official setup | success |
+|---|---|
+| none (exact official protocol) | 98% |
+| dynamic agents (collisions on) | 98% |
+| our reset order | 96% |
+| our reset order + rendered goal image instead of the dataset frame | 90% |
+| first plan from our render instead of the dataset frame | 90% |
 
-| agents | self ring | success | non-trivial (36) | block contact per agent | both touching | helped / hurt |
-|---|---|---|---|---|---|---|
-| 1 | no | 96% | 94% | 0.59 | - | - |
-| 2 | no | 98% | 97% | 0.59 / 0.04 | 0.03 | 2 / 1 |
-| 3 | no | 80% | 72% | 0.53 / 0.04 / 0.03 | 0.03 | 2 / 10 |
-| 1 | yes | 86% | 81% | 0.55 | - | - |
-| 2 | yes | 82% | 75% | 0.53 / 0.03 | 0.01 | 2 / 4 |
-| 3 | yes | 74% | 64% | 0.50 / 0.03 / 0.05 | 0.04 | 3 / 9 |
+The physics change costs nothing. What costs episodes is substituting our renders for dataset images. Those renders differ only at sub-pixel edges, because the dataset stores states as float32 and swm's bilinear resize is already the closest match. Such tiny differences flip 3–4 episodes, so on this protocol a single-seed success rate carries roughly ±6–8 points of noise.
 
-Earlier view modes, all with the dataset goal frame for every agent:
+### Results (50 paired episodes, seed 42, original success test)
 
-| run | success | non-trivial (36) | helped / hurt vs 1 agent |
-|---|---|---|---|
-| 1 LeWM | 100% | 100% | - |
-| 2 LeWM, others hidden | 94% | 92% | 0 / 3 |
-| 2 LeWM, others orange | 92% | 89% | 0 / 4 |
-| 2 LeWM, others blue (identical) | 58% | 44% | 0 / 21 |
-| LeWM + random, identical | 62% | 47% | 0 / 19 |
+Orange others, per-agent goal renders. *helped* / *hurt* count episodes won or lost relative to one agent:
+
+| agents | success | block contact per agent | both touching | agents bumping | helped / hurt |
+|---|---|---|---|---|---|
+| 1 | 90% | 0.39 | - | - | - |
+| 2 | 76% | 0.37 / 0.06 | 0.03 | 0.02 | 3 / 10 |
+| 3 | 60% | 0.33 / 0.05 / 0.05 | 0.04 | 0.05 | 2 / 17 |
+
+Every agent given the same dataset goal frame (which shows a single disk at agent 0's goal spot):
+
+| run | success | helped / hurt vs 1 agent (90%) |
+|---|---|---|
+| 2 LeWM, others orange | 56% | 2 / 19 |
+| 2 LeWM, others hidden | 54% | 0 / 18 |
+| 2 LeWM, others blue (identical) | 22% | 1 / 35 |
+| LeWM + random, identical | 20% | 1 / 36 |
 
 What this shows:
-- **No cooperation emerges at N = 1, 2 or 3.** Independent planners almost never push together (≤ 4% of steps). They solve at most 3 episodes the single agent missed, which is within noise.
-- **Egocentric color coding fixes the identity problem.** With identical blue disks, 2 agents drop to 58%, the same as with a random partner, which fits agent 0 not knowing which disk it moves. With orange others, 2 agents match one agent (98% vs 96%).
-- **The ring costs a pretrained LeWM 6–16 points,** already with one agent (96% → 86%; 2 agents 98% → 82%). The checkpoint never saw a ring on itself, so the ring is out of distribution until a model is trained on this rendering.
-- **3 agents lose through physical interference.** Without the ring, another agent touched the T in all 10 episodes the 3-agent team loses relative to one agent, and when no other agent touches it, success is 100% (with the ring: 10 of 12 losses). The uncoordinated planners bump the T off course (`egocentric/overview_ep10.png`).
+- **No cooperation emerges.** Independent planners push together in at most 4% of steps. They win at most 3 episodes the single agent lost, which is within the noise above.
+- **Extra agents lose by physical interference.** With per-agent goals, every episode lost relative to one agent involved another agent touching the T or bumping agent 0. When the others stay clear, success is 100% (31/31 episodes with 2 agents, 14/14 with 3).
+- **A shared goal image makes agents compete.** When every agent's goal shows one disk at agent 0's spot, all of them head there: agents bump each other in 18 of the 19 lost episodes with orange others (13 of 18 with others hidden).
+- **Identical-looking agents break planning.** With both agents drawn blue, 2 LeWMs do no better than LeWM with a random partner (22% vs 20%).
 
 ## Roadmap
 
