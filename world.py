@@ -4,17 +4,21 @@ Built on stable-worldmodel's single-agent PushT: same physics constants, T-block
 goal and rendering, so a single-agent LeWM checkpoint can be plugged in for every agent.
 
 Per-agent observation (same keys / shapes as single-agent Push-T):
-    pixels  (224, 224, 3) uint8   this agent's view (see `others`)
+    pixels  (224, 224, 3) uint8   this agent's egocentric view (see below)
     proprio (4,)  [x, y, vx, vy]                                   of this agent
     state   (7,)  [x, y, block_x, block_y, block_angle, vx, vy]    of this agent + block
+    goal    (224, 224, 3) uint8   in infos: T at the goal pose + this agent at its goal position
 
 Global state, env.state():
     [agent_xy * N, block_xy, block_angle, agent_vxvy * N]    (N=1: the original 7-d layout)
 
-others -- how the *other* agents appear in an agent's pixels:
-    visible   drawn exactly like the agent itself
-    distinct  drawn in a different color
-    hidden    not drawn (each agent sees a single-agent Push-T)
+Egocentric rendering: shape = entity type, color = role relative to the viewer.
+    self            circle, blue (+ dark ring if self_marker='ring')
+    other agents    circle, orange (others='distinct'); same orange for every other agent,
+                    so it means "another agent", not a fixed identity
+    T-block / goal  gray / green, as in the original
+others='visible' draws other agents like self (blue), others='hidden' leaves them out.
+The audit render (env.render()) is a global view: one identity color + index per agent.
 
 agent_collisions -- the original agent is a kinematic body, and pymunk never collides two
 kinematic bodies, so agents would pass through each other. With agent_collisions=True every
@@ -35,8 +39,10 @@ from stable_worldmodel import spaces as swm_spaces
 from stable_worldmodel.envs.pusht.env import DEFAULT_VARIATIONS, PushT
 from stable_worldmodel.envs.utils import DrawOptions
 
-AUDIT_COLORS = ['RoyalBlue', 'DarkOrange', 'MediumSeaGreen', 'MediumOrchid', 'Crimson', 'Goldenrod']
-OTHER_COLOR = 'DarkOrange'  # others='distinct'
+# identity colors for the audit view: none of them is blue / orange (self / other) or gray / green (T / goal)
+AUDIT_COLORS = ['MediumOrchid', 'Crimson', 'Gold', 'DeepPink', 'Sienna', 'DarkCyan']
+OTHER_COLOR = 'DarkOrange'   # others='distinct'
+RING_COLOR = 'MidnightBlue'  # self_marker='ring'
 OTHERS_MODES = ('visible', 'distinct', 'hidden')
 
 
@@ -54,7 +60,8 @@ class PushTN(PushT):
     def __init__(
         self,
         n_agents=2,
-        others='visible',
+        others='distinct',
+        self_marker='ring',
         agent_collisions=True,
         agent_mass=1000.0,
         success='block',
@@ -62,10 +69,12 @@ class PushTN(PushT):
         **kwargs,
     ):
         assert others in OTHERS_MODES, f'others must be one of {OTHERS_MODES}'
+        assert self_marker in ('ring', 'none')
         assert success in ('block', 'pusht')
         super().__init__(**kwargs)
         self.n_agents = n_agents
         self.others = others
+        self.self_marker = self_marker
         self.agent_collisions = agent_collisions
         self.agent_mass = agent_mass
         self.success = success
@@ -127,6 +136,21 @@ class PushTN(PushT):
                 acceleration = self.k_p * (target - body.position) + self.k_v * (Vec2d(0, 0) - body.velocity)
                 body.velocity += acceleration * self.dt
             self.space.step(self.dt)
+            if self.agent_collisions:
+                self._keep_inside()
+
+    def _keep_inside(self, wall_lo=7.0, wall_hi=504.0):
+        """Walls for dynamic agents: pymunk lets a heavy PD-driven body sink into the thin wall
+        segments, so clamp agent centers inside the arena and drop the outward velocity."""
+        for body in self.agents:
+            r = max(s.radius for s in body.shapes)
+            (x, y), (vx, vy) = body.position, body.velocity
+            lo, hi = wall_lo + r, wall_hi - r
+            if not (lo <= x <= hi and lo <= y <= hi):
+                vx = max(vx, 0.0) if x < lo else min(vx, 0.0) if x > hi else vx
+                vy = max(vy, 0.0) if y < lo else min(vy, 0.0) if y > hi else vy
+                body.position = (min(max(x, lo), hi), min(max(y, lo), hi))
+                body.velocity = (vx, vy)
 
     #########
     # state #
@@ -225,7 +249,7 @@ class PushTN(PushT):
 
         self._set_state(goal_state)
         self._set_goal_state(goal_state)
-        self.goals = [self.render_view(i) for i in range(self.n_agents)]
+        self.goals = [self.render_view(i, others='hidden') for i in range(self.n_agents)]
         self._set_state(state)
 
     def _sample_starts(self, agent0, block, lo=50, hi=450, block_gap=110, agent_gap=60):
@@ -242,8 +266,9 @@ class PushTN(PushT):
     # rendering #
     #############
 
-    def _draw(self, agent_colors, size):
-        """Same drawing as PushT._render_frame, with one color (RGB or RGBA) per agent."""
+    def _draw(self, agent_colors, size, ring=None):
+        """Same drawing as PushT._render_frame, with one color (RGB or RGBA) per agent,
+        and optionally a ring around agent `ring`."""
         canvas = pygame.Surface((self.window_size, self.window_size))
         canvas.fill(self.variation_space['background']['color'].value)
         draw_options = _DrawOptions(canvas)
@@ -263,20 +288,25 @@ class PushTN(PushT):
             self._set_body_color(body, color)
         self._set_body_color(self.block, self.variation_space['block']['color'].value.tolist())
         self.space.debug_draw(draw_options)
+        if ring is not None:
+            body = self.agents[ring]
+            radius = max(s.radius for s in body.shapes)
+            pygame.draw.circle(canvas, pygame.Color(RING_COLOR), pymunk.pygame_util.to_pygame(body.position, canvas), round(radius) + 3, 5)
 
         img = np.transpose(np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2))
         return cv2.resize(img, (size, size)) if size != self.window_size else img
 
-    def render_view(self, i):
-        """Agent i's pixels (224 px, identical to single-agent PushT when others are hidden)."""
+    def render_view(self, i, others=None):
+        """Agent i's egocentric pixels (224 px). With others='hidden' and self_marker='none'
+        this is exactly the single-agent PushT frame."""
         own = self.variation_space['agent']['color'].value.tolist()
         other = {
             'visible': own,
             'distinct': list(pygame.Color(OTHER_COLOR))[:3],
             'hidden': [*own, 0],
-        }[self.others]
+        }[others or self.others]
         colors = [own if j == i else other for j in range(self.n_agents)]
-        return self._draw(colors, self.render_size)
+        return self._draw(colors, self.render_size, ring=i if self.self_marker == 'ring' else None)
 
     def render_audit(self, text=None):
         """Full-resolution view with a distinct color and index per agent, for auditing."""
@@ -285,7 +315,8 @@ class PushTN(PushT):
         k = self.audit_size / self.window_size
         for j, body in enumerate(self.agents):
             x, y = int(body.position[0] * k), int(body.position[1] * k)
-            cv2.putText(img, str(j), (x - 6, y + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            cv2.putText(img, str(j), (x - 6, y + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 4)
+            cv2.putText(img, str(j), (x - 6, y + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
         if text:
             cv2.putText(img, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
         return img

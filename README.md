@@ -82,52 +82,78 @@ Results and per-episode videos are written to `$STABLEWM_HOME/<policy dir>/` (e.
 ```python
 from world import MultiPushT
 
-env = MultiPushT(n_agents=2, others="visible")
-obs, infos = env.reset(seed=0)            # obs["agent_0"] = {"pixels", "proprio", "state"}
+env = MultiPushT(n_agents=3)              # egocentric views: self blue + ring, others orange
+obs, infos = env.reset(seed=0)            # obs["agent_0"] = {"pixels", "proprio", "state"}, infos[...]["goal"]
 obs, rew, term, trunc, infos = env.step({a: env.action_space(a).sample() for a in env.agents})
-frame = env.render()                      # audit frame: agents colored + numbered
+frame = env.render()                      # audit frame: global view, identity color + index per agent
 ```
 
-- **Observation per agent:** the same keys and shapes as single-agent Push-T. `pixels` is the agent's own 224 px view, `proprio` is `[x, y, vx, vy]`, and `state` is `[x, y, block_x, block_y, block_angle, vx, vy]`. `infos[agent]["goal"]` holds the goal image.
-- **`others`:** how other agents appear in a view. `visible` draws them like the agent itself, `distinct` uses another color, `hidden` leaves them out.
-- **`agent_collisions`** (default on): the original agent is a kinematic body, and pymunk never collides two kinematic bodies, so agents would pass through each other. With this on, agents are heavy dynamic bodies driven by the same PD controller. The block dynamics differ from the original by under 0.01 px.
-- **`success`:** `block` requires only the T pose (default). `pusht` is the original criterion, which also requires agent 0 at its goal position.
+**Observation.** Each agent gets the single-agent Push-T keys and shapes: a 224 px `pixels` view, `proprio` `[x, y, vx, vy]` and `state` `[x, y, block_x, block_y, block_angle, vx, vy]`. The view is egocentric: shape encodes the entity type, color encodes its role relative to the viewer.
 
-Checks: with `n_agents=1` and kinematic agents, the env is bit-identical to swm PushT (pixels and 200-step trajectories). `pettingzoo.test.parallel_api_test` passes.
+| entity | shape | appearance in agent *i*'s view |
+|---|---|---|
+| self (agent *i*) | circle | blue, plus a dark ring (`self_marker=ring`, default; `none` = original look) |
+| any other agent | circle | orange (`others=distinct`, default). The same orange for every other agent, so it means "another agent", not an identity. `visible` draws them blue, `hidden` leaves them out |
+| T-block / goal | T | gray / green, as in the original |
+
+An agent's goal image shows the T at its goal pose and the agent itself at its goal position (other agents are left out). Agent 0's goal position is the dataset's; agents 1..N-1 keep their start position. The audit view uses identity colors that are none of blue, orange, gray or green.
+
+**Physics.** `agent_collisions=true` (default): the original agent is a kinematic body, and pymunk never collides two kinematic bodies. So agents become heavy dynamic bodies driven by the same PD controller and kept inside the walls. The T's motion differs from the original by under 0.01 px. `success=block` (default) requires only the T pose; `pusht` is the original criterion, which also requires agent 0 at its goal position.
+
+Checks: with `n_agents=1`, kinematic agents and `self_marker=none`, the env is bit-identical to swm PushT (pixels and 200-step trajectories). `pettingzoo.test.parallel_api_test` passes.
 
 ### Independent LeWM planners
 
-`eval_multi.py` gives every agent its own LeWM instance and its own CEM solver (seed + i), planning on its own view. Everything else follows the `eval.py` protocol: the same 50 dataset episodes, start states and goal frames, with a budget of 50 steps. Agent 0 and the T start from the dataset state. Other agents spawn at seeded random positions away from the T, so every run sees the same episodes and placements.
+`eval_multi.py` gives every agent its own LeWM instance and its own CEM solver (seed + i), planning on its own view toward its own goal image. It follows the `eval.py` protocol: the same 50 dataset episodes and start states, with a budget of 50 steps. Agent 0 and the T start from the dataset state. Other agents spawn at seeded random positions away from the T, so every run sees the same episodes and placements.
 
 ```bash
-python eval_multi.py                                   # 2 LeWMs, others=visible
-python eval_multi.py env.others=distinct               # or hidden
+python eval_multi.py env.n_agents=3                    # defaults: egocentric views + ring, per-agent goal renders
+python eval_multi.py env.n_agents=3 env.self_marker=none
 python eval_multi.py 'policies=[lewm/pusht,random]'    # control: LeWM + random agent
-python eval_multi.py env.n_agents=1                    # single-agent reference
-python eval_multi.py env.n_agents=3 eval.num_eval=10
-python scripts/summarize_multi.py                      # table below
+python scripts/summarize_multi.py --root data/multipusht/egocentric --ref 1a_plain
 ```
 
-Each run writes `results.json` and one audit video per episode (audit view | each agent's view | goal) to `$STABLEWM_HOME/multipusht/<run>/`.
+Each run writes `results.json` and one audit video per episode (audit | each agent's view | goal) to `$STABLEWM_HOME/multipusht/<run>/`.
 
-**Harness check:** `eval_multi.py env.n_agents=1 env.agent_collisions=false env.success=pusht eval.dataset_first_frame=true` gives 98%, and the one failure is the same episode (14) that fails in `eval.py`.
+**Harness check.** The following reproduces `eval.py` exactly: 98%, with the same failed episode (14) and the same per-step trajectories.
 
-**Results** (50 paired episodes, seed 42, `success=block`). *helped* / *hurt* count the episodes solved or lost relative to the single agent:
+```bash
+python eval_multi.py env.n_agents=1 env.agent_collisions=false env.success=pusht env.self_marker=none \
+    eval.goal=dataset eval.dataset_first_frame=true eval.swm_reset=true
+```
 
-| run | success | block contact (agent 0 / 1) | both touching | helped | hurt |
-|---|---|---|---|---|---|
-| 1 LeWM | 100% | 0.60 | - | - | - |
-| 2 LeWM, `hidden` | 94% | 0.58 / 0.03 | 0.01 | 0 | 3 |
-| 2 LeWM, `distinct` | 92% | 0.58 / 0.03 | 0.02 | 0 | 4 |
-| 2 LeWM, `visible` | 58% | 0.44 / 0.05 | 0.01 | 0 | 21 |
-| LeWM + random, `visible` | 60% | 0.44 / 0.02 | 0.01 | 0 | 20 |
+When comparing videos, note that swm records frames only after each step, while `eval_multi.py` also stores t=0. With `success=block`, an episode ends as soon as the T is in place, so the agent does not travel on to its goal position as it does in the official videos.
 
-What this shows so far:
-- **No cooperation emerges.** The second planner never turns a failure into a success (helped = 0). It rarely touches the T, and two agents push together in only 1–2% of steps.
-- **Seeing an identical second disk breaks planning.** With `visible`, success falls to 58%, the same as with a *random* second agent (60%). The damage comes from agent 0's confused perception, not from its partner's actions. The audit videos show agent 0 walking away from the T.
-- **An identity cue restores most of the performance.** A different color (`distinct`) or hiding the other agent (`hidden`) brings success back to 92–94%.
+**Pre-solved episodes.** In 14 of the 50 official episodes the T is already within tolerance at t=0 (the goal is only 25 steps ahead). Under `success=block` these count as successes, so the tables also report success on the 36 non-trivial episodes.
 
-This protocol leaves no room for help, because one agent already solves every episode (goals are 25 steps ahead). Measuring cooperation needs goals a single agent cannot reach, for example a larger `eval.goal_offset_steps` with a matching `eval.eval_budget`.
+### Results (50 paired episodes, seed 42, `success=block`)
+
+Egocentric views (orange others), with and without the self ring. *helped* / *hurt* count episodes won or lost relative to one agent with the same look:
+
+| agents | self ring | success | non-trivial (36) | block contact per agent | both touching | helped / hurt |
+|---|---|---|---|---|---|---|
+| 1 | no | 96% | 94% | 0.59 | - | - |
+| 2 | no | 98% | 97% | 0.59 / 0.04 | 0.03 | 2 / 1 |
+| 3 | no | 80% | 72% | 0.53 / 0.04 / 0.03 | 0.03 | 2 / 10 |
+| 1 | yes | 86% | 81% | 0.55 | - | - |
+| 2 | yes | 82% | 75% | 0.53 / 0.03 | 0.01 | 2 / 4 |
+| 3 | yes | 74% | 64% | 0.50 / 0.03 / 0.05 | 0.04 | 3 / 9 |
+
+Earlier view modes, all with the dataset goal frame for every agent:
+
+| run | success | non-trivial (36) | helped / hurt vs 1 agent |
+|---|---|---|---|
+| 1 LeWM | 100% | 100% | - |
+| 2 LeWM, others hidden | 94% | 92% | 0 / 3 |
+| 2 LeWM, others orange | 92% | 89% | 0 / 4 |
+| 2 LeWM, others blue (identical) | 58% | 44% | 0 / 21 |
+| LeWM + random, identical | 62% | 47% | 0 / 19 |
+
+What this shows:
+- **No cooperation emerges at N = 1, 2 or 3.** Independent planners almost never push together (≤ 4% of steps). They solve at most 3 episodes the single agent missed, which is within noise.
+- **Egocentric color coding fixes the identity problem.** With identical blue disks, 2 agents drop to 58%, the same as with a random partner, which fits agent 0 not knowing which disk it moves. With orange others, 2 agents match one agent (98% vs 96%).
+- **The ring costs a pretrained LeWM 6–16 points,** already with one agent (96% → 86%; 2 agents 98% → 82%). The checkpoint never saw a ring on itself, so the ring is out of distribution until a model is trained on this rendering.
+- **3 agents lose through physical interference.** Without the ring, another agent touched the T in all 10 episodes the 3-agent team loses relative to one agent, and when no other agent touches it, success is 100% (with the ring: 10 of 12 losses). The uncoordinated planners bump the T off course (`egocentric/overview_ep10.png`).
 
 ## Roadmap
 

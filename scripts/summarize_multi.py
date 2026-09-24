@@ -6,6 +6,7 @@
 Paired columns (same seed -> same episodes in every run):
     helped  episodes solved by this run but not by the reference
     hurt    episodes solved by the reference but not by this run
+non-trivial: success on the episodes whose T was not already at the goal at t=0
 """
 
 import argparse
@@ -28,8 +29,8 @@ def main():
     ref = runs.get(args.ref)
     ref_success = np.array([e["success"] for e in ref["episodes"]]) if ref else None
 
-    print(f"| run | agents | success | mean steps | block contact / agent | co-contact | agent-agent contact | helped | hurt |")
-    print(f"|---|---|---|---|---|---|---|---|---|")
+    print("| run | agents | success | non-trivial | mean steps | block contact / agent | co-contact | agent-agent contact | helped | hurt |")
+    print("|---|---|---|---|---|---|---|---|---|---|")
     for name, r in runs.items():
         s, cfg = r["summary"], r["config"]
         success = np.array([e["success"] for e in r["episodes"]])
@@ -38,8 +39,11 @@ def main():
         if ref is not None and len(success) == len(ref_success) and name != args.ref:
             helped, hurt = int((success & ~ref_success).sum()), int((~success & ref_success).sum())
         steps = f"{s['mean_success_step']:.1f}" if s["mean_success_step"] else "-"
+        trivial = np.array([e.get("solved_at_start", False) for e in r["episodes"]])
+        nontrivial = f"{100 * success[~trivial].mean():.0f}% ({int((~trivial).sum())})" if "solved_at_start" in r["episodes"][0] else "-"
         contact = " / ".join(f"{c:.2f}" for c in s["block_contact_frac"])
-        print(f"| {name} | {', '.join(policies)} ({cfg['env']['others']}) | {s['success_rate']:.0f}% | {steps} | "
+        view = f"{cfg['env']['others']}, {cfg['env'].get('self_marker', 'none')}"
+        print(f"| {name} | {', '.join(policies)} ({view}) | {s['success_rate']:.0f}% | {nontrivial} | {steps} | "
               f"{contact} | {s['co_contact_frac']:.2f} | {s['agent_contact_frac']:.2f} | {helped} | {hurt} |")
 
 

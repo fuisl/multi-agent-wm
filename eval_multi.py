@@ -153,11 +153,19 @@ def run(cfg: DictConfig):
     #########################
 
     envs = [MultiPushT(max_episode_steps=10 * cfg.eval.eval_budget, **cfg.env) for _ in range(n)]
-    obs, infos = [], []
+    obs, infos, solved_at_start = [], [], np.zeros(n, dtype=bool)
     for e, env in enumerate(envs):
-        o, i = env.reset(seed=cfg.seed + e, options={"state": init["state"][e], "goal_state": goal["goal_state"][e]})
+        if cfg.eval.swm_reset:  # swm.World order: random reset, then set state / goal (1 agent only)
+            assert n_agents == 1, "eval.swm_reset only reproduces the single-agent protocol"
+            env.reset()
+            env.core._set_state(init["state"][e])
+            env.core._set_goal_state(goal["goal_state"][e])
+            o, i = env._obs(), env._infos()
+        else:
+            o, i = env.reset(seed=cfg.seed + e, options={"state": init["state"][e], "goal_state": goal["goal_state"][e]})
         obs.append(o)
         infos.append(i)
+        solved_at_start[e] = env.core.eval_state(env.core.goal_state, env.state())[0]  # T already at the goal
     agent_goals = []
     for i, ag in enumerate(envs[0].possible_agents):
         g = {k: goal[k] for k in ("goal", "goal_proprio", "goal_state")}
@@ -225,7 +233,7 @@ def run(cfg: DictConfig):
         bc = block_contact[e, : steps[e]]
         episodes_out.append({
             "episode": int(episodes[e]), "start_step": int(start_steps[e]),
-            "success": bool(done[e]), "success_step": int(success_step[e]),
+            "success": bool(done[e]), "success_step": int(success_step[e]), "solved_at_start": bool(solved_at_start[e]),
             "block_pos_err": float(np.linalg.norm(s[2 * N : 2 * N + 2] - g[2 * N : 2 * N + 2])),
             "block_angle_err": float(min(angle, 2 * np.pi - angle)),
             "block_contact_frac": bc.mean(0).tolist(),            # per agent
@@ -238,6 +246,8 @@ def run(cfg: DictConfig):
 
     summary = {
         "success_rate": 100.0 * float(done.mean()),
+        "n_solved_at_start": int(solved_at_start.sum()),
+        "success_rate_nontrivial": 100.0 * float(done[~solved_at_start].mean()) if (~solved_at_start).any() else None,
         "mean_success_step": float(success_step[done].mean()) if done.any() else None,
         "block_contact_frac": np.mean([ep["block_contact_frac"] for ep in episodes_out], 0).tolist(),
         "co_contact_frac": float(np.mean([ep["co_contact_frac"] for ep in episodes_out])),
