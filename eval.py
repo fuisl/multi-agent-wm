@@ -15,8 +15,6 @@ from sklearn import preprocessing
 from torchvision.transforms import v2 as transforms
 import stable_worldmodel as swm
 
-import world  # noqa: F401  (registers swm/MultiPushT-v0)
-
 def img_transform(cfg):
     transform = transforms.Compose(
         [

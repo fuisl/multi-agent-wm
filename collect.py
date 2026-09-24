@@ -8,7 +8,7 @@ import numpy as np
 import stable_worldmodel as swm
 from omegaconf import DictConfig
 
-import world  # noqa: F401  (registers swm/MultiPushT-v0)
+from world import MultiPushT  # noqa: F401
 
 
 class HeuristicPolicy(swm.policy.BasePolicy):
@@ -37,9 +37,8 @@ def get_policy(cfg):
 @hydra.main(version_base=None, config_path="./config/collect", config_name="multipusht")
 def run(cfg: DictConfig):
     """Roll out a policy in the world and write episodes to $STABLEWM_HOME/<cfg.output.name>."""
-    # TODO: world = swm.World(**cfg.world, image_shape=(cfg.img_size, cfg.img_size))
-    # TODO: world.set_policy(get_policy(cfg))
-    # TODO: world.collect(path, episodes=cfg.num_episodes, seed=cfg.seed, format=cfg.output.format)
+    # TODO: roll out MultiPushT(**cfg.env) (PettingZoo parallel API) with get_policy(cfg) per agent
+    # TODO: write episodes with a swm writer: swm.data.get_format(cfg.output.format).open_writer(path)
     raise NotImplementedError
 
 

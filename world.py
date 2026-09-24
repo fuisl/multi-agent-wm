@@ -1,152 +1,378 @@
-"""MultiPush-T world: N agents cooperatively push a T-block to a goal pose.
+"""Multi-agent Push-T: N agents push one T-block, all acting at once (PettingZoo ParallelEnv).
 
-Two layers:
-  - MultiPushTScenario: VMAS scenario (true multi-agent physics, per-agent obs/reward).
-    Usable directly with vmas.make_env(...) for decentralized / MARL / PettingZoo work.
-  - MultiPushT: centralized Gymnasium wrapper for stable-worldmodel.
-    Exposes a joint action a = [a^1, ..., a^N] and a dynamics-sufficient state S_t,
-    so swm.World / collection / CEM planning work unchanged.
+Built on stable-worldmodel's single-agent PushT: same physics constants, T-block, walls,
+goal and rendering, so a single-agent LeWM checkpoint can be plugged in for every agent.
 
-State layout (world-model state, NOT the per-agent policy obs):
-    state   = [agent_1, ..., agent_N, block]              dim = 4N + 7
-      agent_i = [x, y, vx, vy]
-      block   = [x, y, vx, vy, sin(theta), cos(theta), omega]
-    proprio = [agent_1, ..., agent_N]                     dim = 4N
-    action  = [ux_1, uy_1, ..., ux_N, uy_N] in [-1, 1]    dim = 2N
+Per-agent observation (same keys / shapes as single-agent Push-T):
+    pixels  (224, 224, 3) uint8   this agent's view (see `others`)
+    proprio (4,)  [x, y, vx, vy]                                   of this agent
+    state   (7,)  [x, y, block_x, block_y, block_angle, vx, vy]    of this agent + block
+
+Global state, env.state():
+    [agent_xy * N, block_xy, block_angle, agent_vxvy * N]    (N=1: the original 7-d layout)
+
+others -- how the *other* agents appear in an agent's pixels:
+    visible   drawn exactly like the agent itself
+    distinct  drawn in a different color
+    hidden    not drawn (each agent sees a single-agent Push-T)
+
+agent_collisions -- the original agent is a kinematic body, and pymunk never collides two
+kinematic bodies, so agents would pass through each other. With agent_collisions=True every
+agent becomes a heavy dynamic body whose velocity is still set by the PD controller.
 """
 
+import cv2
 import gymnasium as gym
 import numpy as np
-import torch
-import vmas
+import pygame
+import pymunk
+import pymunk.pygame_util
 from gymnasium import spaces
-from vmas.simulator.core import Agent, Box, Landmark, Sphere, World
-from vmas.simulator.scenario import BaseScenario
+from pettingzoo import ParallelEnv
+from pymunk.vec2d import Vec2d
 
-import stable_worldmodel as swm
 from stable_worldmodel import spaces as swm_spaces
+from stable_worldmodel.envs.pusht.env import DEFAULT_VARIATIONS, PushT
+from stable_worldmodel.envs.utils import DrawOptions
 
-AGENT_DIM = 4
-BLOCK_DIM = 7
-
-
-###################
-## VMAS scenario ##
-###################
-
-class MultiPushTScenario(BaseScenario):
-    """VMAS scenario: N holonomic disc agents, one T-shaped rigid body, one goal pose."""
-
-    def make_world(self, batch_dim: int, device: torch.device, **kwargs) -> World:
-        """Build agents, the T-block (two jointed boxes or a compound body) and the goal landmark.
-        kwargs: n_agents, agent_radius, block_mass, ...
-        """
-        raise NotImplementedError
-
-    def reset_world_at(self, env_index=None):
-        """Sample agent / block start poses and the goal pose for env `env_index` (all if None)."""
-        raise NotImplementedError
-
-    def observation(self, agent: Agent):
-        """Decentralized obs o_i = g_i(S): egocentric relative positions / velocities
-        of self, block, goal and other agents (optionally range-limited)."""
-        raise NotImplementedError
-
-    def reward(self, agent: Agent):
-        """Shared team reward (e.g. goal coverage / -pose distance of the block)."""
-        raise NotImplementedError
-
-    def done(self):
-        """(batch_dim,) bool: block pose within tolerance of the goal pose."""
-        raise NotImplementedError
-
-    def info(self, agent: Agent) -> dict:
-        """Extra per-agent info (contacts, distances) for logging."""
-        raise NotImplementedError
-
-    def extra_render(self, env_index: int = 0):
-        """Draw the goal T outline."""
-        raise NotImplementedError
+AUDIT_COLORS = ['RoyalBlue', 'DarkOrange', 'MediumSeaGreen', 'MediumOrchid', 'Crimson', 'Goldenrod']
+OTHER_COLOR = 'DarkOrange'  # others='distinct'
+OTHERS_MODES = ('visible', 'distinct', 'hidden')
 
 
-#################################
-## Centralized Gym env for swm ##
-#################################
+class _DrawOptions(DrawOptions):
+    """Skips circles whose color has alpha 0: hides agents without touching the physics."""
 
-class MultiPushT(gym.Env):
-    metadata = {
-        'render_modes': ['rgb_array'],
-        'render_fps': 10,
-    }
+    def draw_circle(self, pos, angle, radius, outline_color, fill_color):
+        if fill_color.a > 0:
+            super().draw_circle(pos, angle, radius, outline_color, fill_color)
+
+
+class PushTN(PushT):
+    """swm PushT with N agents. Agent 0 is the original `self.agent`."""
 
     def __init__(
         self,
         n_agents=2,
-        resolution=224,
-        render_mode='rgb_array',
-        device='cpu',
-        init_value=None,
+        others='visible',
+        agent_collisions=True,
+        agent_mass=1000.0,
+        success='block',
+        audit_resolution=512,
+        **kwargs,
     ):
+        assert others in OTHERS_MODES, f'others must be one of {OTHERS_MODES}'
+        assert success in ('block', 'pusht')
+        super().__init__(**kwargs)
         self.n_agents = n_agents
-        self.render_size = resolution
-        self.render_mode = render_mode
-        self.device = device
-        self.goal_state = None
-        self.env = None  # vmas env, built lazily in reset()
+        self.others = others
+        self.agent_collisions = agent_collisions
+        self.agent_mass = agent_mass
+        self.success = success
+        self.audit_size = audit_resolution
+        self.env_name = 'MultiPushT'
 
-        state_dim = AGENT_DIM * n_agents + BLOCK_DIM
-        self.observation_space = spaces.Dict(
-            {
-                'proprio': spaces.Box(-np.inf, np.inf, (AGENT_DIM * n_agents,), np.float64),
-                'state': spaces.Box(-np.inf, np.inf, (state_dim,), np.float64),
-            }
-        )
-        self.action_space = spaces.Box(-1.0, 1.0, (2 * n_agents,), np.float32)
+    ###########
+    # physics #
+    ###########
 
-        # TODO: factors of variation (start poses, block mass / friction, colors, ...)
-        self.variation_space = swm_spaces.Dict({})
-        if init_value is not None:
-            self.variation_space.set_init_value(init_value)
+    def _setup(self):
+        super()._setup()
+        agent = self.variation_space['agent']
+        params = {
+            'position': agent['start_position'].value.tolist(),
+            'angle': agent['angle'].value,
+            'scale': agent['scale'].value,
+            'color': agent['color'].value.tolist(),
+            'shape': self.shapes[agent['shape'].value],
+        }
+        self.agents = [self.agent] + [self.add_shape(**params) for _ in range(self.n_agents - 1)]
 
-    def reset(self, seed=None, options=None):
-        """Reset VMAS, sample (or take from options) `state` / `goal_state`,
-        render the goal image into info['goal']. Returns (obs, info)."""
-        super().reset(seed=seed, options=options)
-        raise NotImplementedError
+        if self.agent_collisions:
+            for body in self.agents:
+                body.body_type = pymunk.Body.DYNAMIC
+                body.mass = self.agent_mass
+                body.moment = float('inf')
+                body.velocity_func = _keep_velocity  # PD sets it; no damping (space.damping = 0)
 
-    def step(self, action):
-        """Split joint action into per-agent actions, step VMAS.
-        Returns (obs, reward, terminated, truncated, info)."""
-        raise NotImplementedError
+        self._owner = {s: i for i, b in enumerate(self.agents) for s in b.shapes}
+        self._owner.update({s: 'block' for s in self.block.shapes})
+        self.block_contact = np.zeros(self.n_agents, dtype=bool)
+        self.agent_contact = np.zeros(self.n_agents, dtype=bool)
 
-    def eval_state(self, goal_state, cur_state):
-        """Returns (success, state_dist) from block position / angle error."""
-        raise NotImplementedError
+    def _handle_collision(self, arbiter, space, data):
+        self.n_contact_points += len(arbiter.contact_point_set.points)
+        a, b = (self._owner.get(s) for s in arbiter.shapes)
+        for x, y in ((a, b), (b, a)):
+            if type(x) is int:
+                if y == 'block':
+                    self.block_contact[x] = True
+                elif type(y) is int:
+                    self.agent_contact[x] = True
 
-    def render(self):
-        """RGB frame (H, W, 3) at self.render_size."""
-        raise NotImplementedError
+    def simulate(self, actions):
+        """actions: (N, 2) in [-1, 1], one PushT control step for all agents at once."""
+        self.n_contact_points = 0
+        self.block_contact[:] = False
+        self.agent_contact[:] = False
+        self.latest_action = actions
+        n_steps = int(1 / (self.dt * self.control_hz))
 
-    def close(self):
-        pass
+        targets = [
+            body.position + a * self.action_scale if self.relative else Vec2d(*a)
+            for body, a in zip(self.agents, actions)
+        ]
+        for _ in range(n_steps):
+            for body, target in zip(self.agents, targets):
+                acceleration = self.k_p * (target - body.position) + self.k_v * (Vec2d(0, 0) - body.velocity)
+                body.velocity += acceleration * self.dt
+            self.space.step(self.dt)
 
-    def _get_obs(self):
-        """Centralized, dynamics-sufficient state S_t (see layout above)."""
-        raise NotImplementedError
+    #########
+    # state #
+    #########
 
-    def _get_info(self):
-        """Must contain 'goal' (goal image) and 'goal_state' / 'goal_proprio' for swm."""
-        raise NotImplementedError
+    def _expand(self, state):
+        """7-d single-agent state -> global state (agents 1..N-1 keep their current position)."""
+        state = np.asarray(state, dtype=np.float64)
+        N = self.n_agents
+        if state.shape[0] == 4 * N + 3:
+            return state.copy()
+        assert state.shape[0] in (5, 7), f'bad state shape {state.shape}'
+        pos = np.array([tuple(b.position) for b in self.agents])
+        vel = np.zeros((N, 2))
+        pos[0] = state[:2]
+        if state.shape[0] == 7:
+            vel[0] = state[5:7]
+        return np.concatenate([pos.ravel(), state[2:5], vel.ravel()])
 
     def _set_state(self, state):
-        """Write a full state vector back into the VMAS world (used by swm eval callables)."""
-        raise NotImplementedError
+        state = self._expand(state)
+        N = self.n_agents
+        pos, vel = state[: 2 * N].reshape(N, 2), state[2 * N + 3 :].reshape(N, 2)
+        for body, p, v in zip(self.agents, pos, vel):
+            body.velocity = tuple(v)
+            body.position = tuple(p)
+        self.block.angle = state[2 * N + 2]
+        self.block.position = tuple(state[2 * N : 2 * N + 2])
+        self.space.step(self.dt)  # run physics to take effect
 
     def _set_goal_state(self, goal_state):
-        self.goal_state = goal_state
+        self.goal_state = self._expand(goal_state)
+
+    def _get_obs(self):
+        """Global state (see module docstring)."""
+        pos = [c for b in self.agents for c in b.position]
+        vel = [c for b in self.agents for c in b.velocity]
+        block = [*self.block.position, self.block.angle % (2 * np.pi)]
+        return np.array(pos + block + vel, dtype=np.float64)
+
+    def agent_obs(self, i, state=None):
+        """Per-agent (proprio, state) in the single-agent layout."""
+        s = self._get_obs() if state is None else state
+        N = self.n_agents
+        pos, vel = s[2 * i : 2 * i + 2], s[2 * N + 3 + 2 * i : 2 * N + 5 + 2 * i]
+        return np.concatenate([pos, vel]), np.concatenate([pos, s[2 * N : 2 * N + 3], vel])
+
+    def eval_state(self, goal_state, cur_state):
+        """success: block pose within the PushT tolerance ('pusht': also agent 0, as the original)."""
+        N = self.n_agents
+        b = slice(2 * N, 2 * N + 2)
+        pos_diff = goal_state[b] - cur_state[b]
+        if self.success == 'pusht':
+            pos_diff = np.concatenate([goal_state[:2] - cur_state[:2], pos_diff])
+        pos_diff = np.linalg.norm(pos_diff)
+        angle_diff = np.abs(goal_state[2 * N + 2] - cur_state[2 * N + 2])
+        angle_diff = np.minimum(angle_diff, 2 * np.pi - angle_diff)
+        success = pos_diff < 20 and angle_diff < np.pi / 9
+        return bool(success), float(np.linalg.norm(goal_state - cur_state))
+
+    def reset(self, seed=None, options=None):
+        """options: state / goal_state (7-d or global), agent_starts ((N-1, 2) for agents 1..N-1)."""
+        gym.Env.reset(self, seed=seed)
+        self.rng = np.random.default_rng(seed)
+        options = options or {}
+        swm_spaces.reset_variation_space(self.variation_space, seed, options, DEFAULT_VARIATIONS)
+        self._setup()
+        if self.block_cog is not None:
+            self.block.center_of_gravity = self.block_cog
+        if self.damping is not None:
+            self.space.damping = self.damping
+
+        var = self.variation_space
+        state = options.get('state')
+        if state is None:
+            state = np.concatenate([
+                var['agent']['start_position'].value, var['block']['start_position'].value,
+                [var['block']['angle'].value], var['agent']['velocity'].value,
+            ])
+        goal_state = options.get('goal_state')
+        if goal_state is None:
+            goal_state = np.concatenate([
+                var['agent']['start_position'].sample(set_value=False),
+                var['block']['start_position'].sample(set_value=False),
+                [var['block']['angle'].sample(set_value=False)],
+                var['agent']['velocity'].value,
+            ])
+
+        # place agents 1..N-1 (they keep these positions in the goal configuration too)
+        state = np.asarray(state, dtype=np.float64)
+        starts = options.get('agent_starts')
+        if starts is None and state.shape[0] != 4 * self.n_agents + 3:
+            starts = self._sample_starts(state[:2], state[2:4])
+        for body, p in zip(self.agents[1:], starts if starts is not None else []):
+            body.position = tuple(p)
+
+        self._set_state(goal_state)
+        self._set_goal_state(goal_state)
+        self.goals = [self.render_view(i) for i in range(self.n_agents)]
+        self._set_state(state)
+
+    def _sample_starts(self, agent0, block, lo=50, hi=450, block_gap=110, agent_gap=60):
+        placed = [np.asarray(agent0)]
+        for _ in range(self.n_agents - 1):
+            for _ in range(1000):
+                p = self.np_random.uniform(lo, hi, size=2)
+                if np.linalg.norm(p - block) > block_gap and all(np.linalg.norm(p - q) > agent_gap for q in placed):
+                    break
+            placed.append(p)
+        return np.array(placed[1:])
+
+    #############
+    # rendering #
+    #############
+
+    def _draw(self, agent_colors, size):
+        """Same drawing as PushT._render_frame, with one color (RGB or RGBA) per agent."""
+        canvas = pygame.Surface((self.window_size, self.window_size))
+        canvas.fill(self.variation_space['background']['color'].value)
+        draw_options = _DrawOptions(canvas)
+
+        if bool(self.variation_space['rendering']['render_goal'].value) and self.with_target:
+            goal_color = self.variation_space['goal']['color'].value
+            goal_body = self._get_goal_pose_body(self.goal_pose)
+            for shape in self.block.shapes:
+                if isinstance(shape, pymunk.Circle):
+                    c = pymunk.pygame_util.to_pygame(goal_body.local_to_world(shape.offset), canvas)
+                    pygame.draw.circle(canvas, goal_color, (int(c[0]), int(c[1])), int(shape.radius))
+                else:
+                    pts = [pymunk.pygame_util.to_pygame(goal_body.local_to_world(v), canvas) for v in shape.get_vertices()]
+                    pygame.draw.polygon(canvas, goal_color, pts + [pts[0]])
+
+        for body, color in zip(self.agents, agent_colors):
+            self._set_body_color(body, color)
+        self._set_body_color(self.block, self.variation_space['block']['color'].value.tolist())
+        self.space.debug_draw(draw_options)
+
+        img = np.transpose(np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2))
+        return cv2.resize(img, (size, size)) if size != self.window_size else img
+
+    def render_view(self, i):
+        """Agent i's pixels (224 px, identical to single-agent PushT when others are hidden)."""
+        own = self.variation_space['agent']['color'].value.tolist()
+        other = {
+            'visible': own,
+            'distinct': list(pygame.Color(OTHER_COLOR))[:3],
+            'hidden': [*own, 0],
+        }[self.others]
+        colors = [own if j == i else other for j in range(self.n_agents)]
+        return self._draw(colors, self.render_size)
+
+    def render_audit(self, text=None):
+        """Full-resolution view with a distinct color and index per agent, for auditing."""
+        colors = [list(pygame.Color(AUDIT_COLORS[j % len(AUDIT_COLORS)]))[:3] for j in range(self.n_agents)]
+        img = self._draw(colors, self.audit_size).copy()
+        k = self.audit_size / self.window_size
+        for j, body in enumerate(self.agents):
+            x, y = int(body.position[0] * k), int(body.position[1] * k)
+            cv2.putText(img, str(j), (x - 6, y + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        if text:
+            cv2.putText(img, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+        return img
+
+    def render(self):
+        return self.render_audit()
 
 
-swm.envs.register(
-    id='swm/MultiPushT-v0',
-    entry_point='world:MultiPushT',
-)
+def _keep_velocity(body, gravity, damping, dt):
+    pass
+
+
+class MultiPushT(ParallelEnv):
+    """PettingZoo parallel env: every agent acts at each step; shared reward / termination."""
+
+    metadata = {'name': 'multipusht_v0', 'render_modes': ['rgb_array'], 'render_fps': 10, 'is_parallelizable': True}
+
+    def __init__(self, n_agents=2, max_episode_steps=300, render_mode='rgb_array', **kwargs):
+        self.core = PushTN(n_agents=n_agents, render_mode=render_mode, **kwargs)
+        self.possible_agents = [f'agent_{i}' for i in range(n_agents)]
+        self.agents = []
+        self.render_mode = render_mode
+        self.max_episode_steps = max_episode_steps
+        self._t = 0
+
+        single = self.core.observation_space
+        res = self.core.render_size
+        self._obs_space = spaces.Dict({
+            'pixels': spaces.Box(0, 255, (res, res, 3), np.uint8),
+            'proprio': single['proprio'],
+            'state': single['state'],
+        })
+        self._act_space = self.core.action_space
+
+    def observation_space(self, agent):
+        return self._obs_space
+
+    def action_space(self, agent):
+        return self._act_space
+
+    def reset(self, seed=None, options=None):
+        self.agents = list(self.possible_agents)
+        self._t = 0
+        self.core.reset(seed=seed, options=options)
+        return self._obs(), self._infos()
+
+    def step(self, actions):
+        a = np.stack([np.asarray(actions[ag], dtype=np.float32) for ag in self.possible_agents])  # float32 like the original action space
+        self.core.simulate(a)
+        self._t += 1
+
+        success, dist = self.core.eval_state(self.core.goal_state, self.core._get_obs())
+        truncated = self._t >= self.max_episode_steps
+        rewards = {ag: -dist for ag in self.agents}
+        terminations = {ag: success for ag in self.agents}
+        truncations = {ag: truncated for ag in self.agents}
+        obs, infos = self._obs(), self._infos()
+        if success or truncated:
+            self.agents = []
+        return obs, rewards, terminations, truncations, infos
+
+    def _obs(self):
+        state = self.core._get_obs()
+        obs = {}
+        for i, ag in enumerate(self.possible_agents):
+            proprio, s = self.core.agent_obs(i, state)
+            obs[ag] = {'pixels': self.core.render_view(i), 'proprio': proprio, 'state': s}
+        return obs
+
+    def _infos(self):
+        infos = {}
+        for i, ag in enumerate(self.possible_agents):
+            goal_proprio, goal_state = self.core.agent_obs(i, self.core.goal_state)
+            infos[ag] = {
+                'goal': self.core.goals[i],
+                'goal_state': goal_state,
+                'goal_proprio': goal_proprio,
+                'block_contact': bool(self.core.block_contact[i]),
+                'agent_contact': bool(self.core.agent_contact[i]),
+            }
+        return infos
+
+    def render(self):
+        return self.core.render_audit(f't={self._t}')
+
+    def state(self):
+        return self.core._get_obs()
+
+    def close(self):
+        self.core.close()

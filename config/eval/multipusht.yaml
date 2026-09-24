@@ -3,45 +3,38 @@ defaults:
   - solver: cem
   - _self_
 
-world:
-  env_name: swm/MultiPushT-v0
-  num_envs: ${eval.num_eval}
-  max_episode_steps: ??? # make sure it's >= eval_budget
+env:
   n_agents: 2
+  others: visible        # how other agents appear in an agent's view: visible | distinct | hidden
+  agent_collisions: true # agents collide with each other (and walls); false = original kinematic agents
+  success: block         # block: T pose only | pusht: original criterion (block + agent 0 position)
+
+policy: lewm/pusht       # used for every agent (independent instances); ckpt relative to $STABLEWM_HOME/checkpoints, or random
+policies: null           # optional per-agent list, e.g. [lewm/pusht, random]
 
 dataset:
-  stats: ${eval.dataset_name}
   keys_to_cache:
     - action
     - proprio
     - state
 
 seed: 42
-policy: random # ckpt name or random
 
 plan_config:
   horizon: 5
   receding_horizon: 5
   action_block: 5 # frameskip
 
-# evaluation from dataset (replay trajectories)
+# same protocol as eval/pusht.yaml (same episodes / start steps / goals for a given seed)
 eval:
   num_eval: 50
   goal_offset_steps: 25
   eval_budget: 50
   img_size: 224
-  dataset_name: multipusht_2a_random
-  callables:
-    # -- set state
-    - method: _set_state
-      args:
-        state:
-          value: state
-    # -- set goal state
-    - method: _set_goal_state
-      args:
-        goal_state:
-          value: goal_state
+  dataset_name: pusht_expert_train
+  goal: dataset          # dataset: official goal frame for every agent | render: env goal render of each agent's view
+  dataset_first_frame: false # true = plan the first step from the dataset frame, as eval.py does (only meaningful for 1 agent)
+  video: true
 
 output:
-  filename: multipusht_results.txt
+  dir: multipusht/${env.n_agents}a_${env.others} # relative to $STABLEWM_HOME
