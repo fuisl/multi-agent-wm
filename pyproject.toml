@@ -1,0 +1,14 @@
+[project]
+name = "multi-agent-wm"
+version = "0.1.0"
+description = "LeWM-style world models for multi-agent Push-T (VMAS + stable-worldmodel)"
+requires-python = ">=3.10"
+dependencies = [
+    "hydra-core>=1.3.7",
+    "pettingzoo>=1.27.0",
+    "stable-worldmodel[env,train]>=0.1.1",
+    "vmas>=1.5.2",
+]
+
+[tool.uv.extra-build-dependencies]
+box2d-py = ["swig"]

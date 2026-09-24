@@ -1,0 +1,18 @@
+defaults:
+  - _self_
+  - override hydra/launcher: basic
+
+world:
+  env_name: swm/MultiPushT-v0
+  num_envs: 16
+  max_episode_steps: 200
+  n_agents: 2
+
+seed: 0
+img_size: 224
+num_episodes: 1000
+policy: random # random | heuristic
+
+output:
+  name: multipusht_${world.n_agents}a_${policy} # relative to $STABLEWM_HOME
+  format: lance
