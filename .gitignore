@@ -1,3 +1,5 @@
+# ./data is a per-machine symlink to big storage (scripts/setup_storage.sh)
+/data
 .venv/
 __pycache__/
 outputs/

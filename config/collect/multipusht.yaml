@@ -16,3 +16,9 @@ policy: random # random | heuristic
 output:
   name: multipusht_${world.n_agents}a_${policy} # relative to $STABLEWM_HOME
   format: lance
+
+hydra:
+  run:
+    dir: ${oc.env:STABLEWM_HOME}/outputs/${hydra:job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${oc.env:STABLEWM_HOME}/multirun/${hydra:job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}

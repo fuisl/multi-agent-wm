@@ -1,4 +1,7 @@
+import os
 from pathlib import Path
+
+os.environ.setdefault("STABLEWM_HOME", str(Path(__file__).resolve().parent / "data"))  # ./data -> big disk, see scripts/setup_storage.sh
 
 import hydra
 import numpy as np

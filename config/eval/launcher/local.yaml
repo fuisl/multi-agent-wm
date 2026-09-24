@@ -5,3 +5,9 @@ defaults:
   - override /hydra/launcher: basic
 
 cache_dir: null # use stable-worldmodel default cache
+
+hydra:
+  run:
+    dir: ${oc.env:STABLEWM_HOME}/outputs/${hydra:job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${oc.env:STABLEWM_HOME}/multirun/${hydra:job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}

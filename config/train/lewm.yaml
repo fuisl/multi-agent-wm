@@ -20,6 +20,7 @@ trainer:
   accelerator: gpu
   precision: bf16
   gradient_clip_val: 1.0
+  default_root_dir: ${hydra:runtime.output_dir}
 
 loader:
   batch_size: 128

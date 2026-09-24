@@ -13,3 +13,10 @@ wandb:
     id: ${subdir}
     resume: allow
     log_model: False
+    save_dir: ${hydra:runtime.output_dir}
+
+hydra:
+  run:
+    dir: ${oc.env:STABLEWM_HOME}/outputs/${hydra:job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${oc.env:STABLEWM_HOME}/multirun/${hydra:job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
