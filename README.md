@@ -4,7 +4,7 @@ A minimal, [LeWM](https://github.com/lucas-maes/le-wm)-style codebase for studyi
 
 Like LeWM, this repo contains only the core contribution. [stable-worldmodel](https://github.com/galilai-group/stable-worldmodel) handles environments, data, planning and evaluation, [stable-pretraining](https://github.com/galilai-group/stable-pretraining) handles training, and [PettingZoo](https://pettingzoo.farama.org) is the multi-agent API.
 
-> **Status:** `jepa.py`, `module.py`, `train.py`, `eval.py` and `utils.py` are the official LeWM code, and they reproduce the LeWM Push-T checkpoint. `world.py` is the multi-agent Push-T env and `eval_multi.py` runs N independent LeWM planners in it. `collect.py` is still a scaffold.
+> **Status:** `jepa.py`, `module.py`, `train.py`, `eval.py` and `utils.py` are the official LeWM code, and they reproduce the LeWM Push-T checkpoint. `world.py` is the multi-agent Push-T env, `eval_multi.py` runs N independent LeWM planners in it, and `collect.py` records multi-agent data in the Push-T training format.
 
 ## Layout
 
@@ -12,7 +12,7 @@ Like LeWM, this repo contains only the core contribution. [stable-worldmodel](ht
 |---|---|
 | `world.py` | `MultiPushT`: N-agent Push-T as a PettingZoo `ParallelEnv` (built on swm's PushT) |
 | `eval_multi.py` | N independent LeWM planners acting at once, with audit videos |
-| `collect.py` | (scaffold) roll out a policy in the world, write a dataset to `$STABLEWM_HOME/datasets` |
+| `collect.py` | Roll out a scripted or random policy in `MultiPushT`, write one egocentric episode per agent to `$STABLEWM_HOME/datasets` |
 | `jepa.py` | World model: `encode`, `predict`, `rollout`, `criterion`, `get_cost` |
 | `module.py` | Building blocks: `SIGReg`, `ARPredictor`, `Embedder`, `MLP`, Transformer blocks |
 | `train.py` | Training loop (`lejepa_forward`, Hydra `run`) |
@@ -170,6 +170,27 @@ What this shows:
 - **Extra agents lose by physical interference.** With per-agent goals, every episode lost relative to one agent involved another agent touching the T or bumping agent 0. When the others stay clear, success is 100% (31/31 episodes with 2 agents, 14/14 with 3).
 - **A shared goal image makes agents compete.** When every agent's goal shows one disk at agent 0's spot, all of them head there: agents bump each other in 18 of the 19 lost episodes with orange others (13 of 18 with others hidden).
 - **Identical-looking agents break planning.** With both agents drawn blue, 2 LeWMs do no better than LeWM with a random partner (22% vs 20%).
+
+### Collecting multi-agent data
+
+`collect.py` writes `MultiPushT` rollouts in the layout of `pusht_expert_train.h5`, so `python train.py data=multipusht` runs unchanged. Each env episode (a *scene*) becomes N episodes, one per agent, each from that agent's egocentric view. `action[t]` is applied after observation `t`, and the last row is NaN. The extra columns `scene_idx`, `agent_idx`, `global_state` (Markov-game state), `joint_action`, `block_contact` and `agent_contact` are not loaded by `train.py`.
+
+```bash
+python collect.py                                # 1000 scenes, 2 agents, heuristic -> datasets/multipusht_2a_heuristic.h5
+python collect.py env.n_agents=3 policy=random   # -> datasets/multipusht_3a_random.h5
+```
+
+`policy=heuristic` gives every agent its own noisy scripted pusher. The pusher picks a point on the T's outer boundary, moves just outside it, and pushes into that face for 5–25 steps. One segment in five is instead a walk to a random spot. The agents act independently and do not aim for the goal, and their step size matches the expert's (mean |a| 0.14 vs 0.15). `multipusht_2a_heuristic.h5` (default config, seed 0) holds 1000 scenes, 2000 per-agent episodes and 401,812 frames, about 17% of the frames in the official Push-T data. It takes about 1.7 GB and 20 minutes to collect. Each agent touches the T in 56% of steps (the expert: 39%), both touch it at once in 28%, and the agents bump each other in 12%. The T moves a median of 233 px per scene, and one scene reached the goal by chance. `train.py`'s loader yields 363,812 windows (history 3 + 1 prediction, frameskip 5).
+
+The output is HDF5 in the layout of the official LeWM files. Pixels are Blosc-compressed (lz4, level 5, byte shuffle) in 100-frame chunks, which is lossless and takes about 4 KB per frame instead of 150 KB raw. Other columns are uncompressed, in 1000-row chunks. The small file matters for training speed: the raw 60 GB file does not fit in the page cache, and training became disk-bound at 0.5 it/s on a 240 MB/s disk. Lance is not used because it JPEG-encodes pixels, which adds the kind of render mismatch measured above.
+
+### Training on multi-agent data
+
+```bash
+sbatch scripts/train_slurm.sh data=multipusht output_model_name=lewm_mpt2a_heuristic subdir=lewm_mpt2a_heuristic
+```
+
+This runs the unchanged LeWM recipe (random-init ViT-tiny, end-to-end, prediction loss + SIGReg, 100 epochs) on the full A100 of the `gpu` partition. It uses 12 loader workers and `prefetch_factor=1` instead of LeWM's 3, which changes only how many batches are queued, not the results. The run peaks at 13 GB of VRAM and about 21 GB of RAM (with prefetch 3 it takes 33 GB, because preprocessed float32 batches of about 308 MB each sit in shared memory). It runs at 5 it/s, about 9 minutes per epoch and roughly 15 hours in total.
 
 ## Roadmap
 
