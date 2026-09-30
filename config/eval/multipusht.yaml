@@ -35,6 +35,7 @@ eval:
   goal: render           # render: per-agent goal in the same rendering (T at goal + self) | dataset: official goal frame
   dataset_first_frame: false # true = plan the first step from the dataset frame, as eval.py does (only meaningful for 1 agent)
   swm_reset: false       # true = reset like swm.World (random reset, then set state); with the flags above reproduces eval.py exactly (1 agent)
+  scalers: train         # action/proprio z-scores from each policy's training data (config.yaml next to the ckpt) | eval: from dataset_name
   video: true
 
 output:

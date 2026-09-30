@@ -190,7 +190,20 @@ The output is HDF5 in the layout of the official LeWM files. Pixels are Blosc-co
 sbatch scripts/train_slurm.sh data=multipusht output_model_name=lewm_mpt2a_heuristic subdir=lewm_mpt2a_heuristic
 ```
 
-This runs the unchanged LeWM recipe (random-init ViT-tiny, end-to-end, prediction loss + SIGReg, 100 epochs) on the full A100 of the `gpu` partition. It uses 12 loader workers and `prefetch_factor=1` instead of LeWM's 3, which changes only how many batches are queued, not the results. The run peaks at 13 GB of VRAM and about 21 GB of RAM (with prefetch 3 it takes 33 GB, because preprocessed float32 batches of about 308 MB each sit in shared memory). It runs at 5 it/s, about 9 minutes per epoch and roughly 15 hours in total.
+This runs the unchanged LeWM recipe (random-init ViT-tiny, end-to-end, prediction loss + SIGReg, 100 epochs) on the full A100 of the `gpu` partition. It uses 12 loader workers, `prefetch_factor=1` instead of LeWM's 3, and non-persistent workers. These change only how batches are queued, not the results. The run peaks at 13 GB of VRAM and 26 GB of RAM, at the switch from training to validation. Preprocessed float32 batches of about 308 MB each sit in shared memory, which Slurm counts against `--mem`: with prefetch 3 training alone takes 33 GB, and with persistent workers the train and val worker pools are both alive at the switch, which was OOM-killed at 24 GB. It runs at 5 it/s, about 9 minutes per epoch and roughly 15 hours in total.
+
+A crashed step is retried inside the same allocation: `train.py` resumes from `checkpoints/<subdir>/last.ckpt`. `eval_multi.py` (`eval.scalers=train`) z-scores each policy's actions with the statistics of the data it was trained on, read from the `config.yaml` next to its checkpoint.
+
+**Transfer from the single-agent LeWM.** LeWM's ViT is not an off-the-shelf backbone: it is trained from scratch together with the predictor. Transfer therefore starts from the whole official Push-T checkpoint. `init.ckpt` loads it, `init.freeze` keeps parts fixed (no gradient, eval mode, so the projector's BatchNorm keeps its source statistics), and `scalers_from` keeps the source model's action scaling. The expert data's action std is 0.208 and the heuristic data's is 0.164, so refitting the scalers would feed the pretrained action encoder actions 1.27× too large.
+
+```bash
+# predictor-only: frozen single-agent encoder + projector, train predictor, action encoder, pred_proj
+sbatch scripts/train_slurm.sh trainer.max_epochs=30 init.ckpt=lewm/pusht/weights.pt 'init.freeze=[encoder,projector]' \
+    scalers_from=pusht_expert_train.h5 output_model_name=lewm_mpt2a_ftpred subdir=lewm_mpt2a_ftpred
+# full fine-tune from the same init
+sbatch scripts/train_slurm.sh trainer.max_epochs=30 init.ckpt=lewm/pusht/weights.pt \
+    scalers_from=pusht_expert_train.h5 output_model_name=lewm_mpt2a_ftfull subdir=lewm_mpt2a_ftfull
+```
 
 ## Roadmap
 

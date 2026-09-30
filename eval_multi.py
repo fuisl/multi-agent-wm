@@ -79,6 +79,20 @@ def fit_process(cfg, dataset):
     return process
 
 
+def train_dataset_name(name):
+    """Dataset a checkpoint was trained on, from the config.yaml train.py saves next to it (None if absent).
+
+    The action scaler must match training: the model was fitted on actions z-scored with that dataset's stats.
+    """
+    ckpt = Path(swm.data.utils.get_cache_dir(), "checkpoints", name)
+    cfg_path = (ckpt.parent if ckpt.suffix == ".pt" else ckpt) / "config.yaml"
+    if not cfg_path.exists():
+        return None
+    train_cfg = OmegaConf.load(cfg_path)
+    name = OmegaConf.select(train_cfg, "scalers_from") or OmegaConf.select(train_cfg, "data.dataset.name")
+    return name.removesuffix(".h5")
+
+
 def load_policy(name, cfg, n_envs, process, transform, seed):
     """One independent LeWM planner (own model instance + own CEM solver), or None for random."""
     if name == "random":
@@ -145,7 +159,12 @@ def run(cfg: DictConfig):
     init, goal, _ = _extract_init_goal(dataset, episodes, start_steps, cfg.eval.goal_offset_steps)
     n = len(episodes)
 
-    process = fit_process(cfg, dataset)
+    # scalers per policy, fitted on the dataset that policy was trained on (default: the eval dataset,
+    # which is the official checkpoint's training data)
+    norm_names = [train_dataset_name(name) if name != "random" and cfg.eval.scalers == "train" else None for name in names]
+    norm_names = [nm or cfg.eval.dataset_name for nm in norm_names]
+    processes = {nm: fit_process(cfg, dataset if nm == cfg.eval.dataset_name else get_dataset(cfg, nm)) for nm in set(norm_names)}
+    print("action/proprio scalers fitted on:", dict(zip(names, norm_names)))
     transform = {"pixels": img_transform(cfg), "goal": img_transform(cfg)}
 
     #########################
@@ -174,7 +193,7 @@ def run(cfg: DictConfig):
             g["goal"] = np.stack([inf[ag]["goal"] for inf in infos])
         agent_goals.append(g)
 
-    policies = [load_policy(name, cfg, n, process, transform, cfg.seed + i) for i, name in enumerate(names)]
+    policies = [load_policy(name, cfg, n, processes[nm], transform, cfg.seed + i) for i, (name, nm) in enumerate(zip(names, norm_names))]
     rng = np.random.default_rng(cfg.seed)
 
     #########################

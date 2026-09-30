@@ -9,6 +9,7 @@ import lightning as pl
 import stable_pretraining as spt
 import stable_worldmodel as swm
 import torch
+from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 from omegaconf import OmegaConf, open_dict
 
@@ -22,6 +23,11 @@ def lejepa_forward(self, batch, stage, cfg):
     ctx_len = cfg.history_size
     n_preds = cfg.num_preds
     lambd = cfg.loss.sigreg.weight
+
+    # frozen parts stay in eval mode (projector BatchNorm keeps its source statistics); Lightning
+    # switches the whole module back to train mode at every epoch start
+    for name in cfg.init.freeze:
+        getattr(self.model, name).eval()
 
     # Replace NaN values with 0 (occurs at sequence boundaries)
     batch["action"] = torch.nan_to_num(batch["action"], 0.0)
@@ -59,12 +65,17 @@ def run(cfg):
         dataset_name, transform=None, cache_dir=cache_dir, **dataset_cfg
     )
     transforms = [get_img_preprocessor(source='pixels', target='pixels', img_size=cfg.img_size)]
-    
+    stats_dataset = dataset
+    if cfg.scalers_from:
+        stats_dataset = swm.data.load_dataset(
+            cfg.scalers_from, transform=None, cache_dir=cache_dir, **{**dataset_cfg, "keys_to_load": dataset_cfg["keys_to_cache"]}
+        )
+
     with open_dict(cfg):
         for col in cfg.data.dataset.keys_to_load:
             if col.startswith("pixels"):
                 continue
-            normalizer = get_column_normalizer(dataset, col, col)
+            normalizer = get_column_normalizer(stats_dataset, col, col)
             transforms.append(normalizer)
 
         cfg.model.action_encoder.input_dim = cfg.data.dataset.frameskip * dataset.get_dim("action")
@@ -85,6 +96,11 @@ def run(cfg):
     ##############################
 
     world_model = hydra.utils.instantiate(cfg.model)
+    if cfg.init.ckpt:
+        ckpt = Path(swm.data.utils.get_cache_dir(sub_folder='checkpoints'), cfg.init.ckpt)
+        world_model.load_state_dict(torch.load(ckpt, map_location="cpu"))
+    for name in cfg.init.freeze:
+        getattr(world_model, name).requires_grad_(False)
 
     optimizers = {
         'model_opt': {
@@ -122,21 +138,28 @@ def run(cfg):
     object_dump_callback = SaveCkptCallback(
         run_name=cfg.output_model_name, cfg=cfg.model, epoch_interval=1,
     )
+    # full training state (optimizer, scheduler, epoch) in <run_dir>/last.ckpt, written before
+    # validation so a crash at the train -> val switch loses nothing; rerunning with the same
+    # subdir resumes from it
+    resume_callback = ModelCheckpoint(
+        dirpath=run_dir, filename="last", save_on_train_epoch_end=True, enable_version_counter=False,
+    )
 
     trainer = pl.Trainer(
         **cfg.trainer,
-        callbacks=[object_dump_callback],
+        callbacks=[object_dump_callback, resume_callback],
         num_sanity_val_steps=1,
         logger=logger,
         enable_checkpointing=True,
     )
 
-    ckpt_path = run_dir / f"{cfg.output_model_name}_weights.ckpt"
+    ckpt_path = run_dir / "last.ckpt"
     manager = spt.Manager(
         trainer=trainer,
         module=world_model,
         data=data_module,
         ckpt_path=ckpt_path if ckpt_path.exists() else None,
+        weights_only=False,
     )
 
     manager()

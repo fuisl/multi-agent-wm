@@ -36,6 +36,12 @@ optimizer:
 
 num_preds: 1
 
+# transfer: start from a trained model instead of random init
+init:
+  ckpt: null        # state dict under $STABLEWM_HOME/checkpoints, e.g. lewm/pusht/weights.pt
+  freeze: []        # JEPA parts kept fixed (no grad, eval mode), e.g. [encoder, projector]
+scalers_from: null  # dataset whose stats z-score action/proprio/state (null: the training data); use the init model's data so its inputs keep their meaning
+
 loss:
   sigreg:
     weight: 0.09
