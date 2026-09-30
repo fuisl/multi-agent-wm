@@ -23,6 +23,16 @@ The audit render (env.render()) is a global view: one identity color + index per
 agent_collisions -- the original agent is a kinematic body, and pymunk never collides two
 kinematic bodies, so agents would pass through each other. With agent_collisions=True every
 agent becomes a heavy dynamic body whose velocity is still set by the PD controller.
+
+agent_force -- cooperation by force threshold (None: original physics, where one agent moves
+the T at will). Every agent becomes a light body (mass 1, like the T) pulled by a pivot joint
+of at most agent_force toward an invisible kinematic drive body, which runs the original PD
+controller. In free space the agent follows the original motion; against resistance it
+pushes with exactly agent_force, however small the action. The T gets top-down floor
+friction (pivot + gear joint to the static body, no position correction): it slides only
+under a net force above block_friction x agent_force and turns only under a net torque above
+block_torque_friction x agent_force x its largest lever arm. With both ratios in (1, 2), one
+agent alone can neither slide nor turn the T, and two agents pushing together can.
 """
 
 import cv2
@@ -62,17 +72,26 @@ class PushTN(PushT):
         others='distinct',
         agent_collisions=True,
         agent_mass=1000.0,
+        agent_force=None,
+        block_friction=1.5,
+        block_torque_friction=1.1,
+        solver_iterations=None,
         success='pusht',
         audit_resolution=512,
         **kwargs,
     ):
         assert others in OTHERS_MODES, f'others must be one of {OTHERS_MODES}'
         assert success in ('block', 'pusht')
+        assert agent_force is None or agent_collisions, 'agent_force needs dynamic agents (agent_collisions=True)'
         super().__init__(**kwargs)
         self.n_agents = n_agents
         self.others = others
         self.agent_collisions = agent_collisions
         self.agent_mass = agent_mass
+        self.agent_force = agent_force
+        self.block_friction = block_friction
+        self.block_torque_friction = block_torque_friction
+        self.solver_iterations = solver_iterations
         self.success = success
         self.audit_size = audit_resolution
         self.env_name = 'MultiPushT'
@@ -100,10 +119,37 @@ class PushTN(PushT):
                 body.moment = float('inf')
                 body.velocity_func = _keep_velocity  # PD sets it; no damping (space.damping = 0)
 
+        if self.solver_iterations is not None:
+            self.space.iterations = self.solver_iterations
+        self.drives = []
+        if self.agent_force is not None:
+            for body in self.agents:
+                body.mass = 1.0
+                drive = pymunk.Body(body_type=pymunk.Body.KINEMATIC)
+                drive.position = body.position
+                joint = pymunk.PivotJoint(drive, body, (0, 0), (0, 0))
+                joint.max_force = self.agent_force
+                self.space.add(drive, joint)
+                self.drives.append(drive)
+
         self._owner = {s: i for i, b in enumerate(self.agents) for s in b.shapes}
         self._owner.update({s: 'block' for s in self.block.shapes})
         self.block_contact = np.zeros(self.n_agents, dtype=bool)
         self.agent_contact = np.zeros(self.n_agents, dtype=bool)
+
+    def _add_floor_friction(self):
+        """Top-down Coulomb friction on the T: joints to the static body that only resist velocity."""
+        cog = self.block.center_of_gravity
+        self.block_lever = max(
+            (Vec2d(*v) - cog).length for s in self.block.shapes for v in s.get_vertices()
+        )
+        slide = pymunk.PivotJoint(self.space.static_body, self.block, (0, 0), cog)
+        spin = pymunk.GearJoint(self.space.static_body, self.block, 0.0, 1.0)
+        slide.max_force = self.block_friction * self.agent_force
+        spin.max_force = self.block_torque_friction * self.agent_force * self.block_lever
+        for joint in (slide, spin):
+            joint.max_bias = 0  # no position correction: pure friction
+            self.space.add(joint)
 
     def _handle_collision(self, arbiter, space, data):
         self.n_contact_points += len(arbiter.contact_point_set.points)
@@ -127,8 +173,11 @@ class PushTN(PushT):
             body.position + a * self.action_scale if self.relative else Vec2d(*a)
             for body, a in zip(self.agents, actions)
         ]
+        # with agent_force the PD moves each agent's drive body, which starts from the agent
+        drivers = self.drives or self.agents
+        self._sync_drives()
         for _ in range(n_steps):
-            for body, target in zip(self.agents, targets):
+            for body, target in zip(drivers, targets):
                 acceleration = self.k_p * (target - body.position) + self.k_v * (Vec2d(0, 0) - body.velocity)
                 body.velocity += acceleration * self.dt
             self.space.step(self.dt)
@@ -147,6 +196,10 @@ class PushTN(PushT):
                 vy = max(vy, 0.0) if y < lo else min(vy, 0.0) if y > hi else vy
                 body.position = (min(max(x, lo), hi), min(max(y, lo), hi))
                 body.velocity = (vx, vy)
+
+    def _sync_drives(self):
+        for drive, body in zip(self.drives, self.agents):
+            drive.position, drive.velocity = body.position, body.velocity
 
     #########
     # state #
@@ -175,6 +228,7 @@ class PushTN(PushT):
             body.position = tuple(p)
         self.block.angle = state[2 * N + 2]
         self.block.position = tuple(state[2 * N : 2 * N + 2])
+        self._sync_drives()
         self.space.step(self.dt)  # run physics to take effect
 
     def _set_goal_state(self, goal_state):
@@ -228,6 +282,8 @@ class PushTN(PushT):
             self.block.center_of_gravity = self.block_cog
         if self.damping is not None:
             self.space.damping = self.damping
+        if self.agent_force is not None:
+            self._add_floor_friction()
 
         var = self.variation_space
         state = options.get('state')

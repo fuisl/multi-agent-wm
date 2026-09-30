@@ -205,6 +205,49 @@ sbatch scripts/train_slurm.sh trainer.max_epochs=30 init.ckpt=lewm/pusht/weights
     scalers_from=pusht_expert_train.h5 output_model_name=lewm_mpt2a_ftfull subdir=lewm_mpt2a_ftfull
 ```
 
+## Cooperative Push-T: force threshold
+
+In the settings above, one agent can always do the whole task: agents are 1000× heavier than the T, and the T has no floor friction. Extra agents can only interfere. With `agent_force` set, the T is too heavy for one agent, so success requires two agents pushing together.
+
+- **Agents.** Each agent is a light body (mass 1, like the T), pulled by a pivot joint of at most `agent_force` toward an invisible kinematic drive body. The drive body runs the original PD controller. In free space an agent stays within 2 px of the original motion. Against resistance it pushes with exactly `agent_force`, however small the action: a PD force would scale with the action, so small, expert-sized actions would push weakly.
+- **T.** The T gets top-down floor friction from a pivot joint and a gear joint to the static body, with no position correction. It slides only under a net force above `block_friction` × `agent_force` (1.5) and turns only under a net torque above `block_torque_friction` × `agent_force` × its largest lever arm (1.1 × 76.5 px). One agent's torque is at most about 75 × `agent_force`, so with both ratios in (1, 2), one agent can neither slide nor turn the T, and two can.
+- **Solver.** `solver_iterations=50`: with pymunk's default of 10, the agent → T → friction chain does not converge, and a lone push leaks through at up to 1 px per 30 steps.
+
+Physics checks, with the T in the middle of the arena:
+
+| test | T motion |
+|---|---|
+| 1 agent pushes a face for 200 steps | 0.3 px, 0.2° |
+| 1 agent hammers the T for 200 steps (4 steps in, 4 out, \|a\| = 1) | 0.0 px |
+| 1 agent at the bar tip or the stem end, \|a\| = 1, 30 steps | 0.0 px, 0.0° |
+| 2 agents push the same face, \|a\| = 0.3, 30 steps | 128 px |
+| 2 agents push the bar tips in opposite directions, 30 steps | 24 px, 32° |
+
+```bash
+python eval_multi.py env.n_agents=1 env.agent_force=1e5 env.solver_iterations=50
+python collect.py env.agent_force=1e5 env.solver_iterations=50 policy=coop   # scripted team, see below
+python scripts/coop_oracle.py                                                # scripted team on the eval episodes
+```
+
+`policy=coop` (`collect.CoopPolicy`) is a scripted team that plans with the same thresholds. It works in four steps:
+
+1. List every contact spot on the T's outer boundary where an agent fits.
+2. Score each pair of spots by the part of the two pushes' wrench that exceeds the friction thresholds, compared with the needed translation and rotation, minus a walking cost.
+3. Walk both agents around the T and each other to their spots (8 px grid, wavefront).
+4. Push together for 5 steps, then replan.
+
+Once the T is placed, every agent walks to its goal spot. The team uses privileged state, so it serves as a solvability check and a data source, not as a baseline.
+
+Results on the 50 episodes of the eval protocol. In 14 of them the T already starts within the success tolerance, so the success test only needs agent 0 to walk to its spot. *T must move* counts the other 36:
+
+| run | budget | success | T must move |
+|---|---|---|---|
+| 1 LeWM (official checkpoint) | 50 | 24% | **0%** |
+| 2 independent LeWMs | 50 | 24% | **0%** |
+| scripted team (`coop_oracle.py`) | 50 / 100 / 150 / 300 | 38 / 70 / 80 / 90% | 17 / 58 / 72 / 86% |
+
+Every LeWM success comes from an episode where the T starts in place. The two LeWMs touch the T together in 4% of steps, never at the right moment. Cooperating needs more steps than LeWM's 50-step budget, since both agents must first walk to their spots, so evals in this setting should use `eval.eval_budget=150`.
+
 ## Roadmap
 
 | Level | Setting | Question |

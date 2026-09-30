@@ -7,6 +7,8 @@ env:
   n_agents: 2
   others: distinct       # other agents in an agent's view: distinct (orange) | visible (blue, like self) | hidden
   agent_collisions: true # agents collide with each other (and walls); false = original kinematic agents
+  agent_force: null      # force threshold (world.py): max push per agent; null = original physics. Coop setting: 1e5
+  solver_iterations: null # pymunk solver iterations (null = 10); 50 with agent_force, so a lone push does not leak through the T's friction
   success: pusht         # pusht: original test, T pose + agent 0 at its goal spot | block: T pose only (ends early)
 
 policy: lewm/pusht       # used for every agent (independent instances); ckpt relative to $STABLEWM_HOME/checkpoints, or random
