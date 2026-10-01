@@ -333,6 +333,10 @@ class PushTN(PushT):
         canvas = pygame.Surface((self.window_size, self.window_size))
         canvas.fill(self.variation_space['background']['color'].value)
         draw_options = _DrawOptions(canvas)
+        # no joints: pymunk draws them by default (purple dots at the agent_force pivots and the T's
+        # friction pivot, also for hidden agents), which leaks physics state into the pixels. Collision
+        # points stay, as in the original PushT render (default flags) that LeWM was trained on
+        draw_options.flags = pymunk.SpaceDebugDrawOptions.DRAW_SHAPES | pymunk.SpaceDebugDrawOptions.DRAW_COLLISION_POINTS
 
         if bool(self.variation_space['rendering']['render_goal'].value) and self.with_target:
             goal_color = self.variation_space['goal']['color'].value
