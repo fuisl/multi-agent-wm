@@ -6,6 +6,8 @@ env: # world.MultiPushT kwargs
   n_agents: 2
   others: distinct
   agent_collisions: true
+  agent_force: null         # force threshold (see world.py); cooperative setting: 1e5
+  solver_iterations: null   # 50 with agent_force
   max_episode_steps: 200
 
 seed: 0

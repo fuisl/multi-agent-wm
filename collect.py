@@ -158,16 +158,23 @@ class CoopPolicy:
     moves it. The pair whose excess wrench best matches the needed translation / rotation (minus a
     walking cost) is chosen, both agents walk around the T to their spots, push together for a few
     steps, and the team replans. Once the T is within tolerance, every agent walks to its goal spot.
+
+    For data collection, p_solo > 0 makes each agent break away now and then: for solo_steps it
+    follows its own HeuristicPolicy, so the data also shows lone pushes that do not move the T
+    (and a partner pushing alone). Actions get Gaussian noise, then EMA smoothing, as in
+    HeuristicPolicy.
     """
 
     joint = True
 
     def __init__(self, rng, speed=0.3, push_speed=0.25, push_steps=5, standoff=6.0, spacing=8.0,
-                 noise=0.0, walk_cost=0.3, place_tol=(10.0, np.radians(8)), **kwargs):
+                 noise=0.0, smooth=0.0, walk_cost=0.3, place_tol=(10.0, np.radians(8)),
+                 p_solo=0.0, solo_steps=(5, 25), team_steps=(20, 60), **kwargs):
         self.rng = rng
         self.speed, self.push_speed, self.push_steps = speed, push_speed, push_steps
         self.standoff, self.spacing, self.noise, self.walk_cost = standoff, spacing, noise, walk_cost
-        self.place_tol = place_tol
+        self.smooth, self.place_tol = smooth, place_tol
+        self.p_solo, self.solo_steps, self.team_steps = p_solo, solo_steps, team_steps
 
     def reset(self, core, i):
         if i:
@@ -178,7 +185,27 @@ class CoopPolicy:
         self.plan, self.mode, self.t = None, 'approach', 0
         self.tabu = {}
         self.actions = np.zeros((core.n_agents, 2))
+        self.prev = np.zeros((core.n_agents, 2))
         self.step = 0
+        self.solo = [HeuristicPolicy(self.rng) for _ in range(core.n_agents)]
+        self.solo_until = np.zeros(core.n_agents, dtype=int)  # step until which agent k is solo
+        self.team_until = np.array([self._duration(self.team_steps) for _ in range(core.n_agents)])
+
+    def _duration(self, steps):
+        return self.step + int(self.rng.integers(*steps))
+
+    def _update_solo(self, core, acts):
+        """Replace the team action of agents currently on a solo segment."""
+        for k in range(core.n_agents):
+            if self.step >= max(self.solo_until[k], self.team_until[k]):  # segment over: draw the next
+                if self.rng.random() < self.p_solo:
+                    self.solo_until[k] = self._duration(self.solo_steps)
+                    self.solo[k].reset(core, k)
+                else:
+                    self.team_until[k] = self._duration(self.team_steps)
+            if self.step < self.solo_until[k]:
+                acts[k] = self.solo[k](core, k)
+        return acts
 
     def _contacts(self, core):
         """Spots on the outer boundary of the T where an agent can stand and push (block frame)."""
@@ -367,9 +394,12 @@ class CoopPolicy:
 
     def __call__(self, core, i):
         if i == 0:
-            self.actions = self._plan_step(core)
+            acts = self._plan_step(core)
+            if self.p_solo:
+                acts = self._update_solo(core, acts)
             if self.noise:
-                self.actions = self.actions + self.rng.normal(0, self.noise, self.actions.shape)
+                acts = acts + self.rng.normal(0, self.noise, acts.shape)
+            self.actions = self.prev = self.smooth * self.prev + (1 - self.smooth) * acts
             self.step += 1
         return np.clip(self.actions[i], -1, 1)
 
