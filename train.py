@@ -4,8 +4,10 @@ from pathlib import Path
 
 os.environ.setdefault("STABLEWM_HOME", str(Path(__file__).resolve().parent / "data"))  # ./data -> big disk, see scripts/setup_storage.sh
 
+import h5py
 import hydra
 import lightning as pl
+import numpy as np
 import stable_pretraining as spt
 import stable_worldmodel as swm
 import torch
@@ -15,6 +17,20 @@ from omegaconf import OmegaConf, open_dict
 
 from module import SIGReg
 from utils import get_column_normalizer, get_img_preprocessor, SaveCkptCallback
+
+
+def split_by_episode(dataset, train_split, seed):
+    """Train/val split of whole episodes, and of whole scenes for multi-agent data (collect.py writes one
+    episode per agent, and the agents' episodes of a scene show the same events). The official random
+    window split puts near-copies of training windows in val (neighbouring windows share 3 of 4 frames),
+    so its val loss tracks memorization: 0.003 there vs 0.017 on unseen scenes for lewm_coop_ftfull."""
+    with h5py.File(dataset.h5_path, "r") as f:
+        offsets = f["ep_offset"][:]
+        group = f["scene_idx"][:][offsets] if "scene_idx" in f else np.arange(len(offsets))
+    units = np.random.default_rng(seed).permutation(np.unique(group))
+    val_units = units[: round(len(units) * (1 - train_split))]
+    is_val = np.isin(group[[ep for ep, _ in dataset.clip_indices]], val_units)
+    return spt.data.Subset(dataset, np.nonzero(~is_val)[0].tolist()), spt.data.Subset(dataset, np.nonzero(is_val)[0].tolist())
 
 
 def lejepa_forward(self, batch, stage, cfg):
@@ -84,9 +100,21 @@ def run(cfg):
     dataset.transform = transform
 
     rnd_gen = torch.Generator().manual_seed(cfg.seed)
-    train_set, val_set = spt.data.random_split(
-        dataset, lengths=[cfg.train_split, 1 - cfg.train_split], generator=rnd_gen
-    )
+    run_id = cfg.get("subdir") or ""
+    run_dir = Path(swm.data.utils.get_cache_dir(sub_folder='checkpoints'), run_id)
+    spt_cache = run_dir / "spt"
+    last_ckpts = sorted(spt_cache.glob("runs/*/*/*/checkpoints/last.ckpt"), key=lambda p: p.stat().st_mtime)
+    if last_ckpts and (run_dir / "config.yaml").exists():
+        # a resumed run keeps the split it started with (runs from before split_by used windows)
+        with open_dict(cfg):
+            cfg.split_by = OmegaConf.select(OmegaConf.load(run_dir / "config.yaml"), "split_by", default="window")
+    if cfg.split_by == "episode":
+        train_set, val_set = split_by_episode(dataset, cfg.train_split, cfg.seed)
+    else:  # "window": the official LeWM split
+        train_set, val_set = spt.data.random_split(
+            dataset, lengths=[cfg.train_split, 1 - cfg.train_split], generator=rnd_gen
+        )
+    print(f"split_by={cfg.split_by}: {len(train_set)} train / {len(val_set)} val windows", flush=True)
 
     train = torch.utils.data.DataLoader(train_set, **cfg.loader,shuffle=True, drop_last=True, generator=rnd_gen)
     val = torch.utils.data.DataLoader(val_set, **cfg.loader, shuffle=False, drop_last=False)
@@ -123,9 +151,6 @@ def run(cfg):
     ##       training       ##
     ##########################
 
-    run_id = cfg.get("subdir") or ""
-    run_dir = Path(swm.data.utils.get_cache_dir(sub_folder='checkpoints'), run_id)
-
     logger = None
     if cfg.wandb.enabled:
         logger = WandbLogger(**cfg.wandb.config)
@@ -138,9 +163,11 @@ def run(cfg):
     object_dump_callback = SaveCkptCallback(
         run_name=cfg.output_model_name, cfg=cfg.model, epoch_interval=1,
     )
-    # full training state (optimizer, scheduler, epoch) in <run_dir>/last.ckpt, written before
-    # validation so a crash at the train -> val switch loses nothing; rerunning with the same
-    # subdir resumes from it
+    # full training state (optimizer, scheduler, epoch) in last.ckpt, written before validation so
+    # a crash at the train -> val switch loses nothing; rerunning with the same subdir resumes from
+    # it. spt.Manager redirects every ModelCheckpoint into its cache_dir, so keep that cache per run
+    # (on the big disk, not ~/.cache) and resume from the newest last.ckpt in it
+    spt.set(cache_dir=str(spt_cache))
     resume_callback = ModelCheckpoint(
         dirpath=run_dir, filename="last", save_on_train_epoch_end=True, enable_version_counter=False,
     )
@@ -153,12 +180,13 @@ def run(cfg):
         enable_checkpointing=True,
     )
 
-    ckpt_path = run_dir / "last.ckpt"
+    ckpt_path = last_ckpts[-1] if last_ckpts else None
+    print(f"resuming from {ckpt_path}" if ckpt_path else "no last.ckpt, starting fresh", flush=True)
     manager = spt.Manager(
         trainer=trainer,
         module=world_model,
         data=data_module,
-        ckpt_path=ckpt_path if ckpt_path.exists() else None,
+        ckpt_path=ckpt_path,
         weights_only=False,
     )
 

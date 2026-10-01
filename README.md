@@ -63,8 +63,10 @@ python scripts/download_lewm.py pusht
 python eval.py --config-name=pusht policy=lewm/pusht
 
 # retrain from scratch with the official hyperparameters
-python train.py data=pusht
+python train.py data=pusht split_by=window
 ```
+
+`split_by=window` is the official validation split: random windows, so neighbouring windows that share 3 of their 4 frames land on both sides. Our default, `split_by=episode`, holds out whole episodes, or whole scenes for multi-agent data. With the window split, val loss tracks memorization: `lewm_coop_ftfull` reaches 0.003 there but 0.017 on unseen scenes. Like the paper, we judge a model by planning success and latent probes. The episode-level val loss is a monitor of generalization, not the target.
 
 `download_lewm.py` rewrites the HF `config.json` so that the checkpoint loads into this repo's `jepa.JEPA` / `module.*` (strict `load_state_dict`), not swm's bundled copy. `policy=` is a path relative to `$STABLEWM_HOME/checkpoints`. `python scripts/download_lewm.py all` also fetches TwoRoom, Cube and Reacher (~73GB compressed).
 
@@ -192,7 +194,7 @@ sbatch scripts/train_slurm.sh data=multipusht output_model_name=lewm_mpt2a_heuri
 
 This runs the unchanged LeWM recipe (random-init ViT-tiny, end-to-end, prediction loss + SIGReg, 100 epochs) on the full A100 of the `gpu` partition. It uses 12 loader workers, `prefetch_factor=1` instead of LeWM's 3, and non-persistent workers. These change only how batches are queued, not the results. The run peaks at 13 GB of VRAM and 26 GB of RAM, at the switch from training to validation. Preprocessed float32 batches of about 308 MB each sit in shared memory, which Slurm counts against `--mem`: with prefetch 3 training alone takes 33 GB, and with persistent workers the train and val worker pools are both alive at the switch, which was OOM-killed at 24 GB. It runs at 5 it/s, about 9 minutes per epoch and roughly 15 hours in total.
 
-A crashed step is retried inside the same allocation: `train.py` resumes from `checkpoints/<subdir>/last.ckpt`. `eval_multi.py` (`eval.scalers=train`) z-scores each policy's actions with the statistics of the data it was trained on, read from the `config.yaml` next to its checkpoint.
+A crashed step is retried inside the same allocation: `train.py` resumes from the newest `last.ckpt` under `checkpoints/<subdir>/spt/` (stable-pretraining's run cache, kept per run), and a resumed run keeps the validation split it started with. Temp files go to `tmp/<job id>/` in the repo, not `/tmp`. `eval_multi.py` (`eval.scalers=train`) z-scores each policy's actions with the statistics of the data it was trained on, read from the `config.yaml` next to its checkpoint.
 
 **Transfer from the single-agent LeWM.** LeWM's ViT is not an off-the-shelf backbone: it is trained from scratch together with the predictor. Transfer therefore starts from the whole official Push-T checkpoint. `init.ckpt` loads it, `init.freeze` keeps parts fixed (no gradient, eval mode, so the projector's BatchNorm keeps its source statistics), and `scalers_from` keeps the source model's action scaling. The expert data's action std is 0.208 and the heuristic data's is 0.164, so refitting the scalers would feed the pretrained action encoder actions 1.27× too large.
 
@@ -207,7 +209,7 @@ sbatch scripts/train_slurm.sh trainer.max_epochs=30 init.ckpt=lewm/pusht/weights
 
 ## Cooperative Push-T: force threshold
 
-In the settings above, one agent can always do the whole task: agents are 1000× heavier than the T, and the T has no floor friction. Extra agents can only interfere. With `agent_force` set, the T is too heavy for one agent, so success requires two agents pushing together.
+In the settings above, one agent can always do the whole task. The official physics is quasi-static: swm sets `space.damping = 0`, which in pymunk removes all velocity every step, so the T moves only while pushed and stops when contact ends. But it has no friction threshold, so any push moves it, and the agent is kinematic (here: 1000× heavier than the T) and cannot be stopped. Extra agents can only interfere. With `agent_force` set, the T is too heavy for one agent, so success requires two agents pushing together.
 
 - **Agents.** Each agent is a light body (mass 1, like the T), pulled by a pivot joint of at most `agent_force` toward an invisible kinematic drive body. The drive body runs the original PD controller. In free space an agent stays within 2 px of the original motion. Against resistance it pushes with exactly `agent_force`, however small the action: a PD force would scale with the action, so small, expert-sized actions would push weakly.
 - **T.** The T gets top-down floor friction from a pivot joint and a gear joint to the static body, with no position correction. It slides only under a net force above `block_friction` × `agent_force` (1.5) and turns only under a net torque above `block_torque_friction` × `agent_force` × its largest lever arm (1.1 × 76.5 px). One agent's torque is at most about 75 × `agent_force`, so with both ratios in (1, 2), one agent can neither slide nor turn the T, and two can.

@@ -9,6 +9,9 @@ subdir: ${hydra:job.id}
 
 num_workers: 6
 train_split: 0.9
+# episode: val holds whole unseen episodes (whole scenes for multi-agent data), so val loss measures
+# generalization | window: the official LeWM random window split, whose val windows overlap train frames
+split_by: episode
 seed: 3072
 img_size: 224
 embed_dim: 192

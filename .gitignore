@@ -8,3 +8,4 @@ wandb/
 lightning_logs/
 *.ckpt
 *.pt
+/tmp/
