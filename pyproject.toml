@@ -13,3 +13,17 @@ dependencies = [
 
 [tool.uv.extra-build-dependencies]
 box2d-py = ["swig"]
+
+# CUDA 12.8 wheels: the H100 cluster's driver is 12.8, and PyPI's default torch wheels need CUDA 13
+[tool.uv]
+# 2.11 is the newest torch built for CUDA 12.8; the index's newer, untagged wheels are CUDA 13 builds
+constraint-dependencies = ["torch<2.12", "torchvision<0.27"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

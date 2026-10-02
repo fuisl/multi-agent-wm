@@ -35,6 +35,8 @@ block_torque_friction x agent_force x its largest lever arm. With both ratios in
 agent alone can neither slide nor turn the T, and two agents pushing together can.
 """
 
+import contextlib
+
 import cv2
 import gymnasium as gym
 import numpy as np
@@ -78,6 +80,8 @@ class PushTN(PushT):
         solver_iterations=None,
         success='pusht',
         audit_resolution=512,
+        jpeg_quality=None,
+        exact_reset_render=True,
         **kwargs,
     ):
         assert others in OTHERS_MODES, f'others must be one of {OTHERS_MODES}'
@@ -94,6 +98,8 @@ class PushTN(PushT):
         self.solver_iterations = solver_iterations
         self.success = success
         self.audit_size = audit_resolution
+        self.jpeg_quality = jpeg_quality
+        self.exact_reset_render = exact_reset_render
         self.env_name = 'MultiPushT'
 
     ###########
@@ -311,8 +317,38 @@ class PushTN(PushT):
 
         self._set_state(goal_state)
         self._set_goal_state(goal_state)
-        self.goals = [self.render_view(i, others='hidden') for i in range(self.n_agents)]
+        with self._placed(goal_state if self.exact_reset_render else None):
+            self.goals = [self.render_view(i, others='hidden') for i in range(self.n_agents)]
+        self.reset_state = self._expand(state) if self.exact_reset_render else None  # drawn by the first observation
         self._set_state(state)
+
+    @contextlib.contextmanager
+    def _placed(self, state):
+        """Bodies temporarily at exactly `state` (None: unchanged), for rendering only.
+
+        _set_state ends with a physics step, which moves the agents by velocity * dt (up to ~2 px
+        in the expert data), so frames drawn after it are off the state they stand for. A dataset
+        frame shows its state exactly. Positions are restored afterwards, so physics is unchanged.
+        """
+        if state is None:
+            yield
+            return
+        bodies = [*self.agents, self.block]
+        saved = [(b.position, b.angle) for b in bodies]
+        state = self._expand(state)
+        N = self.n_agents
+        for body, p in zip(self.agents, state[: 2 * N].reshape(N, 2)):
+            body.position = tuple(p)
+        self.block.angle = state[2 * N + 2]
+        self.block.position = tuple(state[2 * N : 2 * N + 2])
+        for b in bodies:
+            self.space.reindex_shapes_for_body(b)  # shapes keep their old world vertices until reindexed
+        try:
+            yield
+        finally:
+            for b, (p, a) in zip(bodies, saved):
+                b.position, b.angle = p, a
+                self.space.reindex_shapes_for_body(b)
 
     def _sample_starts(self, agent0, block, lo=50, hi=450, block_gap=110, agent_gap=60):
         placed = [np.asarray(agent0)]
@@ -367,7 +403,13 @@ class PushTN(PushT):
             'hidden': [*own, 0],
         }[others or self.others]
         colors = [own if j == i else other for j in range(self.n_agents)]
-        return self._draw(colors, self.render_size)
+        img = self._draw(colors, self.render_size)
+        if self.jpeg_quality is not None:
+            # the official Push-T frames went through a 4:2:0 codec (chroma bleed, ringing on the white
+            # background); cv2's JPEG subsamples 4:2:0 too, and q95-100 matches them best
+            ok, buf = cv2.imencode('.jpg', img[..., ::-1], [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
+            img = cv2.imdecode(buf, cv2.IMREAD_COLOR)[..., ::-1].copy()
+        return img
 
     def render_audit(self, text=None):
         """Full-resolution view with a distinct color and index per agent, for auditing."""
@@ -422,7 +464,9 @@ class MultiPushT(ParallelEnv):
         self.agents = list(self.possible_agents)
         self._t = 0
         self.core.reset(seed=seed, options=options)
-        return self._obs(), self._infos()
+        with self.core._placed(self.core.reset_state):  # pixels at the requested state; proprio/state stay physical
+            pixels = [self.core.render_view(i) for i in range(self.core.n_agents)]
+        return self._obs(pixels), self._infos()
 
     def step(self, actions):
         a = np.stack([np.asarray(actions[ag], dtype=np.float32) for ag in self.possible_agents])  # float32 like the original action space
@@ -439,12 +483,12 @@ class MultiPushT(ParallelEnv):
             self.agents = []
         return obs, rewards, terminations, truncations, infos
 
-    def _obs(self):
+    def _obs(self, pixels=None):
         state = self.core._get_obs()
         obs = {}
         for i, ag in enumerate(self.possible_agents):
             proprio, s = self.core.agent_obs(i, state)
-            obs[ag] = {'pixels': self.core.render_view(i), 'proprio': proprio, 'state': s}
+            obs[ag] = {'pixels': self.core.render_view(i) if pixels is None else pixels[i], 'proprio': proprio, 'state': s}
         return obs
 
     def _infos(self):

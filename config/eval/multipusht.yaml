@@ -10,6 +10,8 @@ env:
   agent_force: null      # force threshold (world.py): max push per agent; null = original physics. Coop setting: 1e5
   solver_iterations: null # pymunk solver iterations (null = 10); 50 with agent_force, so a lone push does not leak through the T's friction
   success: pusht         # pusht: original test, T pose + agent 0 at its goal spot | block: T pose only (ends early)
+  exact_reset_render: true # draw the goal image and first frame at the exact requested state, not one physics step later (physics unchanged)
+  jpeg_quality: null     # 95: JPEG 4:2:0 round-trip on every agent view, like the official Push-T frames (null = clean renders)
 
 policy: lewm/pusht       # used for every agent (independent instances); ckpt relative to $STABLEWM_HOME/checkpoints, or random
 policies: null           # optional per-agent list, e.g. [lewm/pusht, random]

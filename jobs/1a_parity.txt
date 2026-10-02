@@ -1,0 +1,6 @@
+# single-agent parity: 1 agent in MultiPushT vs the official eval (98%); default setup otherwise
+eval_multi.py env.n_agents=1 env.exact_reset_render=false output.dir=multipusht/1a_parity/old
+eval_multi.py env.n_agents=1 output.dir=multipusht/1a_parity/exact
+eval_multi.py env.n_agents=1 env.jpeg_quality=95 output.dir=multipusht/1a_parity/exact_jpeg95
+eval_multi.py env.n_agents=1 env.jpeg_quality=100 output.dir=multipusht/1a_parity/exact_jpeg100
+eval_multi.py env.n_agents=1 env.jpeg_quality=95 env.agent_collisions=false env.others=hidden output.dir=multipusht/1a_parity/exact_jpeg95_kinematic
