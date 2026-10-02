@@ -1,0 +1,6 @@
+eval_multi.py env.n_agents=1 eval.video=false seed=0 env.jpeg_quality=95 output.dir=multipusht/1a_seeds/exact_jpeg95_s0
+eval_multi.py env.n_agents=1 eval.video=false seed=0 env.jpeg_quality=100 output.dir=multipusht/1a_seeds/exact_jpeg100_s0
+eval_multi.py env.n_agents=1 eval.video=false seed=1 env.jpeg_quality=95 output.dir=multipusht/1a_seeds/exact_jpeg95_s1
+eval_multi.py env.n_agents=1 eval.video=false seed=1 env.jpeg_quality=100 output.dir=multipusht/1a_seeds/exact_jpeg100_s1
+eval_multi.py env.n_agents=1 eval.video=false seed=2 env.jpeg_quality=95 output.dir=multipusht/1a_seeds/exact_jpeg95_s2
+eval_multi.py env.n_agents=1 eval.video=false seed=2 env.jpeg_quality=100 output.dir=multipusht/1a_seeds/exact_jpeg100_s2

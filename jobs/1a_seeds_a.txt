@@ -1,0 +1,6 @@
+eval_multi.py env.n_agents=1 eval.video=false seed=0 env.agent_collisions=false env.others=hidden eval.goal=dataset eval.dataset_first_frame=true eval.swm_reset=true output.dir=multipusht/1a_seeds/official_s0
+eval_multi.py env.n_agents=1 eval.video=false seed=0 env.exact_reset_render=false output.dir=multipusht/1a_seeds/old_s0
+eval_multi.py env.n_agents=1 eval.video=false seed=1 env.agent_collisions=false env.others=hidden eval.goal=dataset eval.dataset_first_frame=true eval.swm_reset=true output.dir=multipusht/1a_seeds/official_s1
+eval_multi.py env.n_agents=1 eval.video=false seed=1 env.exact_reset_render=false output.dir=multipusht/1a_seeds/old_s1
+eval_multi.py env.n_agents=1 eval.video=false seed=2 env.agent_collisions=false env.others=hidden eval.goal=dataset eval.dataset_first_frame=true eval.swm_reset=true output.dir=multipusht/1a_seeds/official_s2
+eval_multi.py env.n_agents=1 eval.video=false seed=2 env.exact_reset_render=false output.dir=multipusht/1a_seeds/old_s2
