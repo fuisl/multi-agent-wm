@@ -31,4 +31,7 @@ for name in sys.argv[1:]:
                 f.copy(f[key], g, name=key)  # raw chunk copy, filters kept
         g.create_dataset("action", data=ego.astype(np.float32), chunks=(1000, 4))
         g.create_dataset("action_self", data=own, chunks=(1000, 2))
+        for key in ("ep_len", "ep_offset", "episode_idx", "scene_idx"):  # a copy read too early (NFS) gets zeros here
+            assert np.array_equal(g[key][:], f[key][:]), f"{key} differs from the source"
+        assert g["ep_len"][:].sum() == len(ego) > 0, "episode index does not cover the rows"
     print(f"{dst}: action {ego.shape} = [self, partner]")
