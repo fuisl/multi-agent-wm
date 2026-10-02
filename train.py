@@ -33,6 +33,34 @@ def split_by_episode(dataset, train_split, seed):
     return spt.data.Subset(dataset, np.nonzero(~is_val)[0].tolist()), spt.data.Subset(dataset, np.nonzero(is_val)[0].tolist())
 
 
+def widen_action_encoder(state, model, frameskip):
+    """Load a single-agent action encoder into a joint-action one, keeping its function.
+
+    The Embedder maps a step's frameskip actions, packed time-major, through a 1x1 conv (in -> smoothed)
+    and an MLP. Joint data packs [self, partner] per env step, so source input column k*a + d (step k,
+    coordinate d of the a-dim action) becomes k*A + d, with A the joint action dim; the partner columns
+    are zero in the source rows. The new conv rows keep their random init and the MLP's columns for them
+    are zero, so the widened model computes exactly the source function, and gradient still reaches the
+    new path (zero-init on the output side only, as in ControlNet's zero convolution).
+    """
+    own = model.state_dict()
+    conv, lin = "action_encoder.patch_embed", "action_encoder.embed.0"
+    if state[f"{conv}.weight"].shape == own[f"{conv}.weight"].shape:
+        return state
+    w, b, lw = state[f"{conv}.weight"], state[f"{conv}.bias"], state[f"{lin}.weight"]
+    s_out, s_in = w.shape[:2]
+    a, A = s_in // frameskip, own[f"{conv}.weight"].shape[1] // frameskip
+    cols = torch.tensor([k * A + d for k in range(frameskip) for d in range(a)])
+    new_w, new_b, new_lw = own[f"{conv}.weight"].clone(), own[f"{conv}.bias"].clone(), own[f"{lin}.weight"].clone()
+    new_w[:s_out] = 0.0
+    new_w[:s_out, cols] = w
+    new_b[:s_out] = b
+    new_lw.zero_()
+    new_lw[:, :s_out] = lw
+    print(f"widened action encoder: conv {tuple(w.shape)} -> {tuple(new_w.shape)}, embed {tuple(lw.shape)} -> {tuple(new_lw.shape)}")
+    return {**state, f"{conv}.weight": new_w, f"{conv}.bias": new_b, f"{lin}.weight": new_lw}
+
+
 def lejepa_forward(self, batch, stage, cfg):
     """encode observations, predict next states, compute losses."""
 
@@ -91,7 +119,9 @@ def run(cfg):
         for col in cfg.data.dataset.keys_to_load:
             if col.startswith("pixels"):
                 continue
-            normalizer = get_column_normalizer(stats_dataset, col, col)
+            # joint-action data ([self, partner] per step) with single-agent scalers: z-score each agent's half alike
+            tile = dataset.get_dim(col) // stats_dataset.get_dim(col) if col == "action" else 1
+            normalizer = get_column_normalizer(stats_dataset, col, col, tile=tile)
             transforms.append(normalizer)
 
         cfg.model.action_encoder.input_dim = cfg.data.dataset.frameskip * dataset.get_dim("action")
@@ -126,7 +156,7 @@ def run(cfg):
     world_model = hydra.utils.instantiate(cfg.model)
     if cfg.init.ckpt:
         ckpt = Path(swm.data.utils.get_cache_dir(sub_folder='checkpoints'), cfg.init.ckpt)
-        world_model.load_state_dict(torch.load(ckpt, map_location="cpu"))
+        world_model.load_state_dict(widen_action_encoder(torch.load(ckpt, map_location="cpu"), world_model, cfg.data.dataset.frameskip))
     for name in cfg.init.freeze:
         getattr(world_model, name).requires_grad_(False)
 

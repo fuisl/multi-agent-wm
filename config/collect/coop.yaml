@@ -1,0 +1,20 @@
+# Cooperative Push-T data: force-threshold physics, scripted team with noise, smoothing and solo segments.
+#   python collect.py --config-name=coop                                                    # train, 1000 scenes
+#   python collect.py --config-name=coop seed=1 num_episodes=100 output.name=multipusht_2a_coop_heldout.h5
+defaults:
+  - multipusht
+  - _self_
+
+env:
+  agent_force: 1.0e5
+  solver_iterations: 50
+  jpeg_quality: 95          # the 4:2:0 codec of the official Push-T frames LeWM was trained on
+
+policy: coop
+policy_kwargs:
+  noise: 0.05               # HeuristicPolicy defaults
+  smooth: 0.5
+  p_solo: 0.2               # segments where one agent pushes alone (and the T does not move)
+
+output:
+  name: multipusht_2a_coop.h5
