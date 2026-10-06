@@ -1,0 +1,13 @@
+# 2-agent coop eval, budget 50: zero-shot single-agent LeWM vs coop fine-tuned (own action) vs joint-action (decentralized / centralized planning)
+eval_multi.py env.agent_force=1e5 env.solver_iterations=50 env.jpeg_quality=95 eval.eval_budget=50 eval.video=true seed=0 policy=lewm/pusht output.dir=multipusht/coop/eval/b50/zeroshot_s0
+eval_multi.py env.agent_force=1e5 env.solver_iterations=50 env.jpeg_quality=95 eval.eval_budget=50 eval.video=true seed=0 policy=lewm_coop2_ftfull/weights_epoch_30.pt output.dir=multipusht/coop/eval/b50/own_s0
+eval_multi.py env.agent_force=1e5 env.solver_iterations=50 env.jpeg_quality=95 eval.eval_budget=50 eval.video=true seed=0 policy=lewm_coop2_joint/weights_epoch_30.pt joint=decentralized output.dir=multipusht/coop/eval/b50/joint_dec_s0
+eval_multi.py env.agent_force=1e5 env.solver_iterations=50 env.jpeg_quality=95 eval.eval_budget=50 eval.video=true seed=0 policy=lewm_coop2_joint/weights_epoch_30.pt joint=centralized output.dir=multipusht/coop/eval/b50/joint_cen_s0
+eval_multi.py env.agent_force=1e5 env.solver_iterations=50 env.jpeg_quality=95 eval.eval_budget=50 eval.video=false seed=1 policy=lewm/pusht output.dir=multipusht/coop/eval/b50/zeroshot_s1
+eval_multi.py env.agent_force=1e5 env.solver_iterations=50 env.jpeg_quality=95 eval.eval_budget=50 eval.video=false seed=1 policy=lewm_coop2_ftfull/weights_epoch_30.pt output.dir=multipusht/coop/eval/b50/own_s1
+eval_multi.py env.agent_force=1e5 env.solver_iterations=50 env.jpeg_quality=95 eval.eval_budget=50 eval.video=false seed=1 policy=lewm_coop2_joint/weights_epoch_30.pt joint=decentralized output.dir=multipusht/coop/eval/b50/joint_dec_s1
+eval_multi.py env.agent_force=1e5 env.solver_iterations=50 env.jpeg_quality=95 eval.eval_budget=50 eval.video=false seed=1 policy=lewm_coop2_joint/weights_epoch_30.pt joint=centralized output.dir=multipusht/coop/eval/b50/joint_cen_s1
+eval_multi.py env.agent_force=1e5 env.solver_iterations=50 env.jpeg_quality=95 eval.eval_budget=50 eval.video=false seed=2 policy=lewm/pusht output.dir=multipusht/coop/eval/b50/zeroshot_s2
+eval_multi.py env.agent_force=1e5 env.solver_iterations=50 env.jpeg_quality=95 eval.eval_budget=50 eval.video=false seed=2 policy=lewm_coop2_ftfull/weights_epoch_30.pt output.dir=multipusht/coop/eval/b50/own_s2
+eval_multi.py env.agent_force=1e5 env.solver_iterations=50 env.jpeg_quality=95 eval.eval_budget=50 eval.video=false seed=2 policy=lewm_coop2_joint/weights_epoch_30.pt joint=decentralized output.dir=multipusht/coop/eval/b50/joint_dec_s2
+eval_multi.py env.agent_force=1e5 env.solver_iterations=50 env.jpeg_quality=95 eval.eval_budget=50 eval.video=false seed=2 policy=lewm_coop2_joint/weights_epoch_30.pt joint=centralized output.dir=multipusht/coop/eval/b50/joint_cen_s2

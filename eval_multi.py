@@ -1,7 +1,8 @@
 """N independent LeWM planners acting at once in multi-agent Push-T.
 
 Same protocol as eval.py (same dataset episodes, start states, goal frames, budget and
-solver), except that every agent runs its own model + CEM solver on its own view.
+solver), except that every agent runs its own model + CEM solver on its own view (joint-action
+checkpoints: `joint=decentralized` or `joint=centralized`, see config/eval/multipusht.yaml).
 Agent 0 and the block start from the dataset state; agents 1..N-1 are placed at random
 (seeded) positions away from the block. Writes results.json and one audit video per episode.
 """
@@ -11,6 +12,7 @@ from pathlib import Path
 
 os.environ.setdefault("STABLEWM_HOME", str(Path(__file__).resolve().parent / "data"))  # ./data -> big disk, see scripts/setup_storage.sh
 
+import copy
 import json
 import time
 from types import SimpleNamespace
@@ -93,7 +95,15 @@ def train_dataset_name(name):
     return name.removesuffix(".h5")
 
 
-def load_policy(name, cfg, n_envs, process, transform, seed):
+def tile_process(process, n):
+    """Action scaler repeated n times: joint actions [self, partner] are z-scored per agent alike, as in train.py."""
+    act = copy.deepcopy(process["action"])
+    act.mean_, act.var_, act.scale_ = np.tile(act.mean_, n), np.tile(act.var_, n), np.tile(act.scale_, n)
+    act.n_features_in_ *= n
+    return {**process, "action": act}
+
+
+def load_policy(name, cfg, n_envs, process, transform, seed, action_dim=2):
     """One independent LeWM planner (own model instance + own CEM solver), or None for random."""
     if name == "random":
         return None
@@ -107,8 +117,8 @@ def load_policy(name, cfg, n_envs, process, transform, seed):
     # the planner only needs the batched action space of "its" env
     policy.set_env(SimpleNamespace(
         num_envs=n_envs,
-        action_space=spaces.Box(-1.0, 1.0, (n_envs, 2), np.float32),
-        single_action_space=spaces.Box(-1.0, 1.0, (2,), np.float32),
+        action_space=spaces.Box(-1.0, 1.0, (n_envs, action_dim), np.float32),
+        single_action_space=spaces.Box(-1.0, 1.0, (action_dim,), np.float32),
     ))
     return policy
 
@@ -196,7 +206,16 @@ def run(cfg: DictConfig):
             g["goal"] = np.stack([inf[ag]["goal"] for inf in infos])
         agent_goals.append(g)
 
-    policies = [load_policy(name, cfg, n, processes[nm], transform, cfg.seed + i) for i, (name, nm) in enumerate(zip(names, norm_names))]
+    joint = cfg.get("joint")
+    assert joint in (None, "decentralized", "centralized"), f"joint={joint}"
+    if joint:
+        assert n_agents == 2 and "random" not in names, "joint-action planning: 2 agents, both LeWM"
+        processes = {nm: tile_process(p, 2) for nm, p in processes.items()}
+        # centralized: only agent 0's planner exists; agent 1 executes the partner half of its plan
+        n_planners = 1 if joint == "centralized" else n_agents
+        policies = [load_policy(names[i], cfg, n, processes[norm_names[i]], transform, cfg.seed + i, action_dim=4) for i in range(n_planners)]
+    else:
+        policies = [load_policy(name, cfg, n, processes[nm], transform, cfg.seed + i) for i, (name, nm) in enumerate(zip(names, norm_names))]
     rng = np.random.default_rng(cfg.seed)
 
     #########################
@@ -222,16 +241,24 @@ def run(cfg: DictConfig):
     start_time = time.time()
     for t in range(cfg.eval.eval_budget):
         actions = []
-        for i, (ag, policy) in enumerate(zip(envs[0].possible_agents, policies)):
-            if policy is None:
-                a = rng.uniform(-1, 1, size=(n, 2)).astype(np.float32)
-            else:
-                info = agent_info(obs, ag, agent_goals[i], last_action[i], done)
-                if t == 0 and cfg.eval.dataset_first_frame:  # what swm.World does (single agent only)
-                    info["pixels"] = init["pixels"][:, None]
-                a = policy.get_action(info)
+        if joint == "centralized":  # agent 0's plan is [agent 0, agent 1]
+            a = policies[0].get_action(agent_info(obs, envs[0].possible_agents[0], agent_goals[0], np.concatenate(last_action, 1), done))
+            actions = [a[:, :2], a[:, 2:]]
+        else:
+            for i, (ag, policy) in enumerate(zip(envs[0].possible_agents, policies)):
+                if policy is None:
+                    a = rng.uniform(-1, 1, size=(n, 2)).astype(np.float32)
+                elif joint == "decentralized":  # plan [self, partner] on own view, execute own half
+                    joint_last = np.concatenate([last_action[i], last_action[1 - i]], 1)
+                    a = policy.get_action(agent_info(obs, ag, agent_goals[i], joint_last, done))[:, :2]
+                else:
+                    info = agent_info(obs, ag, agent_goals[i], last_action[i], done)
+                    if t == 0 and cfg.eval.dataset_first_frame:  # what swm.World does (single agent only)
+                        info["pixels"] = init["pixels"][:, None]
+                    a = policy.get_action(info)
+                actions.append(a)
+        for i, a in enumerate(actions):
             last_action[i] = np.nan_to_num(a)
-            actions.append(a)
 
         for e, env in enumerate(envs):
             if done[e]:
