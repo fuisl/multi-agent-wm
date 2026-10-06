@@ -129,6 +129,17 @@ def use_probe_cost(model, path):
     model.criterion = criterion
 
 
+def use_action_penalty(model, weight):
+    """Add weight * mean(a_z^2) to each candidate's cost. Actions are z-scored by the data's scaler, so this keeps
+    plans near the action distribution the model was trained on, where its predictions hold (open-loop audit)."""
+    get_cost = model.get_cost
+
+    def penalized(info_dict, action_candidates):  # candidates (B, S, H, D)
+        return get_cost(info_dict, action_candidates) + weight * action_candidates.pow(2).mean(dim=(2, 3))
+
+    model.get_cost = penalized
+
+
 def load_policy(name, cfg, n_envs, process, transform, seed, action_dim=2):
     """One independent LeWM planner (own model instance + own CEM solver), or None for random."""
     if name == "random":
@@ -138,6 +149,8 @@ def load_policy(name, cfg, n_envs, process, transform, seed, action_dim=2):
     model.interpolate_pos_encoding = True
     if cfg.get("cost", "latent") == "probe":
         use_probe_cost(model, cfg.cost_probe)
+    if cfg.get("action_penalty"):
+        use_action_penalty(model, float(cfg.action_penalty))
     solver = hydra.utils.instantiate(cfg.solver, model=model, seed=seed)
     policy = LazyWorldModelPolicy(
         solver=solver, config=swm.PlanConfig(**cfg.plan_config), process=process, transform=transform

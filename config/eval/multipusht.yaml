@@ -17,6 +17,7 @@ policy: lewm/pusht       # used for every agent (independent instances); ckpt re
 policies: null           # optional per-agent list, e.g. [lewm/pusht, random]
 cost: latent             # planning cost: latent = ||z_hat - z_goal||^2 | probe = success-test quantities read by a probe
 cost_probe: null         # probe file under $STABLEWM_HOME/checkpoints (scripts/fit_cost_probe.py), for cost=probe
+action_penalty: 0.0       # > 0: add action_penalty * mean(a_z^2) to the planning cost (keeps plans near the data)
 joint: null              # joint-action checkpoints (action = [self, partner], 2 agents): decentralized = every agent plans
                          # the joint action on its own view and executes its own half | centralized = agent 0 plans for both
 
