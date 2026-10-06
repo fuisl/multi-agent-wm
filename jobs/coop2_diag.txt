@@ -1,0 +1,5 @@
+# coop2 diagnostics (Job A): latent audit, open loop + simulator check, cost along scripted episodes, true-sim CEM 2x2
+scripts/latent_audit.py
+scripts/open_loop.py lewm && .venv/bin/python scripts/open_loop.py coop2_ftfull && .venv/bin/python scripts/open_loop.py coop2_joint
+scripts/cost_landscape.py
+scripts/sim_latent_cem.py --costs coop2_ftfull coop2_ftfull_visible coop2_ftfull_sum coop2_joint lewm true --procs 9

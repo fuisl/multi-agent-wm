@@ -103,6 +103,32 @@ def tile_process(process, n):
     return {**process, "action": act}
 
 
+ANGLE_W = 20.0 / np.radians(20)  # probe cost: 20 deg weighs like 20 px, the two success tolerances
+
+
+def use_probe_cost(model, path):
+    """Replace the planning cost ||z_hat - z_goal||^2 by the success test's quantities read off the latents with a
+    probe (scripts/fit_cost_probe.py): |self xy|^2 + |T xy|^2 + (ANGLE_W * T angle)^2 between prediction and goal, px^2."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
+    from probe import make_probe
+    ck = torch.load(Path(os.environ["STABLEWM_HOME"]) / "checkpoints" / path, map_location="cpu", weights_only=False)
+    probe = make_probe(ck["kind"], ck["in_dim"], ck["out_dim"])
+    probe.load_state_dict(ck["state_dict"])
+    probe = probe.to("cuda").eval().requires_grad_(False)
+    m, s = (torch.as_tensor(ck[k], dtype=torch.float32, device="cuda") for k in ("mean", "std"))
+
+    def criterion(info_dict):
+        pred = probe(info_dict["predicted_emb"][..., -1, :].float()) * s + m   # (B, S, 6)
+        goal = probe(info_dict["goal_emb"][..., -1, :].float()) * s + m
+        goal = goal.expand_as(pred)
+        ang = torch.atan2(pred[..., 4], pred[..., 5]) - torch.atan2(goal[..., 4], goal[..., 5])
+        ang = torch.atan2(torch.sin(ang), torch.cos(ang))
+        return (pred[..., :4] - goal[..., :4]).pow(2).sum(-1) + (ANGLE_W * ang).pow(2)
+
+    model.criterion = criterion
+
+
 def load_policy(name, cfg, n_envs, process, transform, seed, action_dim=2):
     """One independent LeWM planner (own model instance + own CEM solver), or None for random."""
     if name == "random":
@@ -110,6 +136,8 @@ def load_policy(name, cfg, n_envs, process, transform, seed, action_dim=2):
     model = swm.wm.utils.load_pretrained(name).to("cuda").eval()
     model.requires_grad_(False)
     model.interpolate_pos_encoding = True
+    if cfg.get("cost", "latent") == "probe":
+        use_probe_cost(model, cfg.cost_probe)
     solver = hydra.utils.instantiate(cfg.solver, model=model, seed=seed)
     policy = LazyWorldModelPolicy(
         solver=solver, config=swm.PlanConfig(**cfg.plan_config), process=process, transform=transform

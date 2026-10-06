@@ -3,10 +3,12 @@
 H1 content   linear / MLP probes: self pos, partner pos, T pos, T angle, self contact, partner contact
 H2 geometry  planning cost ||z_t - z_goal||^2 (goal 25 steps later, as eval) regressed on squared state deltas
 H3 physics   real transitions: self pushes alone / both push / no contact. Predicted T displacement
-             (T probe on the predicted next latent) vs true; counterfactual with own action zeroed
+             (T probe on the predicted next latent) vs true; counterfactuals with own action zeroed and,
+             for joint-action models ([self, partner] per step), partner action zeroed and both zeroed
 Probes / splits by scene (70/10/20), test numbers on held-out-of-probe scenes.
 
-    CUDA_VISIBLE_DEVICES=1 python scripts/latent_audit.py    # -> data/multipusht/coop/latent_audit/
+    python scripts/latent_audit.py           # coop2 models (H100) -> data/multipusht/coop/latent_audit_coop2/
+    AUDIT_SET=coop1 python scripts/latent_audit.py    # the A100 coop models -> data/multipusht/coop/latent_audit/
 """
 import json, os, sys
 from pathlib import Path
@@ -22,10 +24,10 @@ from probe import load_model, fit_probe, MEAN, STD
 
 torch.set_num_threads(4)
 dev = "cuda"
-OUT = REPO / "data/multipusht/coop/latent_audit"
-OUT.mkdir(parents=True, exist_ok=True)
+AUDIT_SET = os.environ.get("AUDIT_SET", "coop2")
+OUT = REPO / "data/multipusht/coop" / ("latent_audit" if AUDIT_SET == "coop1" else f"latent_audit_{AUDIT_SET}")
 DATA = REPO / "data/datasets/multipusht_2a_coop_heldout.h5"
-MODELS = {
+MODELS_COOP1 = {
     "lewm (= ftpred encoder)": "lewm/pusht/weights.pt",
     "coop_ftpred": "lewm_coop_ftpred/weights_epoch_30.pt",
     "coop_ftfull": "lewm_coop_ftfull/weights_epoch_30.pt",
@@ -33,6 +35,14 @@ MODELS = {
     "mpt2a_heuristic": "lewm_mpt2a_heuristic/weights_epoch_100.pt",
     "random": "random",
 }
+MODELS_COOP2 = {
+    "lewm": "lewm/pusht/weights.pt",
+    "coop2_ftfull": "lewm_coop2_ftfull/weights_epoch_30.pt",
+    "coop2_joint": "lewm_coop2_joint/weights_epoch_30.pt",
+    "random": "random",
+}
+MODELS = MODELS_COOP1 if AUDIT_SET == "coop1" else MODELS_COOP2
+JOINT = {"coop2_joint"}  # action input = [self, partner] per env step
 ENCODER_SAME_AS = {"coop_ftpred": "lewm (= ftpred encoder)"}  # frozen encoder: skip H1/H2
 
 # ---------------------------------------------------------------- data
@@ -40,6 +50,8 @@ h = h5py.File(DATA, "r")
 N = len(h["agent_idx"])
 gs, ag, scene, step = h["global_state"][:], h["agent_idx"][:], h["scene_idx"][:], h["step_idx"][:]
 act_raw = h["action"][:]
+_joint = h["joint_action"][:]  # agent-index order -> egocentric [self, partner], as make_joint_dataset.py
+act_joint = np.where(ag[:, None] == 0, _joint, _joint[:, [2, 3, 0, 1]])
 contact = h["block_contact"][:].astype(np.float32)
 off, length = h["ep_offset"][:], h["ep_len"][:]
 pos = gs[:, :4].reshape(N, 2, 2)
@@ -161,9 +173,13 @@ def action_stats(ds):
 
 
 @torch.no_grad()
-def physics(model, Z, decode, name):
+def physics(model, Z, decode, ck, name):
     """windows of 4 frames (stride 5) in test scenes; predict frame 3; classify transition 2->3 by contacts."""
-    mean, std = action_stats(scaler_source(name))
+    mean, std = action_stats(scaler_source(ck))
+    joint = name in JOINT
+    A, d = (act_joint, 4) if joint else (act_raw, 2)
+    if joint:  # single-agent scaler tiled over [self, partner], as train.py
+        mean, std = np.tile(mean, 2), np.tile(std, 2)
     W = []
     for e in range(len(off)):
         if scene[off[e]] not in cut["test"]:
@@ -172,9 +188,9 @@ def physics(model, Z, decode, name):
             W.append(off[e] + s)
     W = np.array(W)
     frames = W[:, None] + 5 * np.arange(4)
-    acts = np.stack([act_raw[W + 5 * k + j] for k in range(4) for j in range(5)], 1).reshape(len(W), 4, 5, 2)
-    acts = np.nan_to_num((acts - mean) / std).reshape(len(W), 4, 10).astype(np.float32)
-    zero = np.broadcast_to(((0 - mean) / std).astype(np.float32), (len(W), 5, 2)).reshape(len(W), 10)
+    acts = np.stack([A[W + 5 * k + j] for k in range(4) for j in range(5)], 1).reshape(len(W), 4, 5, d)
+    acts = np.nan_to_num((acts - mean) / std).astype(np.float32)
+    zero = ((0 - mean) / std).astype(np.float32)  # a zero env action, z-scored (d,)
     tr = frames[:, 2][:, None] + np.arange(5)  # rows of transition 2 -> 3
     sc, pc = contact[tr].max(1), partner_contact[tr].max(1)
     cls = np.where((sc > 0) & (pc > 0), "both push", np.where(sc > 0, "self alone", np.where(pc > 0, "partner alone", "no contact")))
@@ -196,9 +212,15 @@ def physics(model, Z, decode, name):
         return dpos, dang
 
     now = decode(Z[frames[:, 2]]).numpy()
-    p_true = pred_T(acts)
-    a0 = acts.copy(); a0[:, 2] = zero
-    p_zero = pred_T(a0)
+    flat = lambda a: a.reshape(len(W), 4, 5 * d)
+    p_true = pred_T(flat(acts))
+    a0 = acts.copy(); a0[:, 2, :, :2] = zero[:2]  # own action zeroed in the transition 2 -> 3
+    p_zero = pred_T(flat(a0))
+    cf = {}
+    if joint:
+        ap = acts.copy(); ap[:, 2, :, 2:] = zero[2:]
+        ab = acts.copy(); ab[:, 2] = zero
+        cf = {"partner_zeroed": disp(pred_T(flat(ap)), now)[0], "both_zeroed": disp(pred_T(flat(ab)), now)[0]}
     tpos, tang = disp(true_T[frames[:, 3]], true_T[frames[:, 2]])
     ppos, pang = disp(p_true, now)
     zpos, zang = disp(p_zero, now)
@@ -209,9 +231,12 @@ def physics(model, Z, decode, name):
                   "pred_own_action_zeroed_px": float(np.median(zpos[m])),
                   "true_deg": float(np.median(tang[m])), "pred_deg": float(np.median(pang[m])),
                   "zeroed_deg": float(np.median(zang[m]))}
+        for k, v in cf.items():
+            out[c][f"pred_{k}_px"] = float(np.median(v[m]))
         o = out[c]
         print(f"   {c:14s} n={o['n']:5d}  T moves: true {o['true_px']:5.1f}px {o['true_deg']:4.1f}°  "
-              f"predicted {o['pred_px']:5.1f}px {o['pred_deg']:4.1f}°  own action zeroed {o['pred_own_action_zeroed_px']:5.1f}px {o['zeroed_deg']:4.1f}°", flush=True)
+              f"predicted {o['pred_px']:5.1f}px {o['pred_deg']:4.1f}°  own action zeroed {o['pred_own_action_zeroed_px']:5.1f}px {o['zeroed_deg']:4.1f}°"
+              + "".join(f"  {k.replace('_', ' ')} {o[f'pred_{k}_px']:5.1f}px" for k in cf), flush=True)
     return out
 
 
@@ -243,6 +268,7 @@ def spectrum(Z):
 
 
 def main():
+    OUT.mkdir(parents=True, exist_ok=True)
     results, Zs = {}, {}
     for name, ck in MODELS.items():
         print(f"== {name} ({ck})", flush=True)
@@ -255,7 +281,7 @@ def main():
             r["probes"] = probes(Z)
             r["geometry"] = geometry(Z)
         if name != "random":
-            r["physics"] = physics(model, Z, t_pose_probe(Z), ck)
+            r["physics"] = physics(model, Z, t_pose_probe(Z), ck, name)
         results[name] = r
         del model; torch.cuda.empty_cache()
         (OUT / "latent_audit.json").write_text(json.dumps(results, indent=1))
